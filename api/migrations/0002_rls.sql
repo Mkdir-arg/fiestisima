@@ -17,11 +17,11 @@ alter table movements   enable row level security;
 -- ---------------------------------------------------------------- businesses
 -- Everyone sees their own business; only the titolare edits it.
 
-create policy businesses_select on businesses for select to authenticated
-  using (id = auth_business_id());
-create policy businesses_update on businesses for update to authenticated
-  using (id = auth_business_id() and auth_role() = 'titolare')
-  with check (id = auth_business_id());
+create policy businesses_select on businesses for select to app_user
+  using (id = app_business_id());
+create policy businesses_update on businesses for update to app_user
+  using (id = app_business_id() and app_role() = 'titolare')
+  with check (id = app_business_id());
 
 -- ---------------------------------------------------------------- profiles
 -- Everyone sees their colleagues; only the titolare edits someone else's
@@ -33,14 +33,14 @@ create policy businesses_update on businesses for update to authenticated
 -- vanished user - see the "on delete restrict" comments on those columns
 -- in 0001.
 
-create policy profiles_select on profiles for select to authenticated
-  using (business_id = auth_business_id());
-create policy profiles_update_self on profiles for update to authenticated
-  using (id = auth.uid())
-  with check (id = auth.uid() and business_id = auth_business_id());
-create policy profiles_update_titolare on profiles for update to authenticated
-  using (business_id = auth_business_id() and auth_role() = 'titolare')
-  with check (business_id = auth_business_id());
+create policy profiles_select on profiles for select to app_user
+  using (business_id = app_business_id());
+create policy profiles_update_self on profiles for update to app_user
+  using (id = app_user_id())
+  with check (id = app_user_id() and business_id = app_business_id());
+create policy profiles_update_titolare on profiles for update to app_user
+  using (business_id = app_business_id() and app_role() = 'titolare')
+  with check (business_id = app_business_id());
 
 -- RLS's using/with check clauses each see only one version of the row (the
 -- pre-update row for using, the post-update row for with check); neither can
@@ -57,25 +57,26 @@ create policy profiles_update_titolare on profiles for update to authenticated
 -- lets everyone else update their own row (full_name, etc.) but never
 -- those two columns, on their own row or anyone else's.
 --
--- The service role's exemption is written explicitly (auth.uid() is not
+-- The owner's exemption is written explicitly (app_user_id() is not
 -- null), not implied by null propagation, and the role-gate uses "is
 -- distinct from", not "<>". A first version of this trigger used a plain
--- "auth_role() <> 'titolare'" with no separate service-role check, on the
--- reasoning that a null auth_role() would make the whole condition null and
--- therefore inert - true for the service role, whose auth.uid() actually is
--- null, but auth_role() is *also* null for a deactivated caller who still
--- holds a valid, pre-deactivation JWT (profiles_update_self's using clause
--- only tests id = auth.uid(), which a deactivated user still satisfies). "<>"
+-- "app_role() <> 'titolare'" with no separate owner check, on the
+-- reasoning that a null app_role() would make the whole condition null and
+-- therefore inert - true when running as the database owner (migrations,
+-- invitation acceptance), whose app_user_id() actually is null, but
+-- app_role() is *also* null for a deactivated caller who still holds a
+-- valid, pre-deactivation JWT (profiles_update_self's using clause only
+-- tests id = app_user_id(), which a deactivated user still satisfies). "<>"
 -- against that null silently did not fire, so a "harmless" future edit that
--- dropped profiles_update_self's with check business_id = auth_business_id()
--- (it looks redundant next to id = auth.uid(), but it is the only other
+-- dropped profiles_update_self's with check business_id = app_business_id()
+-- (it looks redundant next to id = app_user_id(), but it is the only other
 -- thing failing that update today) would have reopened self-reactivation and
 -- self-promotion for exactly that caller. "is distinct from" treats that
 -- null as "not titolare" - true, not null - so the guard fires on its own,
 -- independent of whatever profiles_update_self's with check does or stops
--- doing. The explicit "auth.uid() is not null" is what carves out the
--- service role instead, since without it "null is distinct from 'titolare'"
--- would also be true and would block admin/service-role writes to role or
+-- doing. The explicit "app_user_id() is not null" is what carves out the
+-- owner instead, since without it "null is distinct from 'titolare'"
+-- would also be true and would block owner writes to role or
 -- active, breaking every test fixture that deactivates a profile directly.
 --
 -- Deliberately left out: a titolare cannot step down or deactivate
@@ -89,8 +90,8 @@ create policy profiles_update_titolare on profiles for update to authenticated
 -- statement below), so it never fires on insert - the clause that
 -- guarantees that is the trigger's own "before update on profiles", not
 -- anything in the function body. That matters because a newly invited user
--- inserting their own profiles row has auth.uid() set but auth_role() null
--- (no profile exists yet to resolve a role from): were this ever an
+-- inserting their own profiles row has app_user_id() set but app_role()
+-- null (no profile exists yet to resolve a role from): were this ever an
 -- insert-or-update trigger, the condition above would misfire on every
 -- signup. It also could not safely run on insert regardless, since old is
 -- null for an insert and old.role/old.active would themselves error.
@@ -101,8 +102,8 @@ set search_path = public
 as $$
 begin
   if (new.role is distinct from old.role or new.active is distinct from old.active)
-     and auth.uid() is not null
-     and auth_role() is distinct from 'titolare' then
+     and app_user_id() is not null
+     and app_role() is distinct from 'titolare' then
     raise exception 'only a titolare can change role or active' using errcode = '42501';
   end if;
   return new;
@@ -116,36 +117,36 @@ for each row execute function profiles_block_self_role_change();
 -- ---------------------------------------------------------------- invitations
 -- Only the titolare invites, sees pending invitations, or revokes them.
 
-create policy invitations_all on invitations for all to authenticated
-  using (business_id = auth_business_id() and auth_role() = 'titolare')
-  with check (business_id = auth_business_id() and auth_role() = 'titolare');
+create policy invitations_all on invitations for all to app_user
+  using (business_id = app_business_id() and app_role() = 'titolare')
+  with check (business_id = app_business_id() and app_role() = 'titolare');
 
 -- ---------------------------------------------------------------- suppliers / categories / products / events
 -- Everyone reads the catalog; only titolare and responsabile write it.
 
-create policy suppliers_select on suppliers for select to authenticated
-  using (business_id = auth_business_id());
-create policy suppliers_write on suppliers for all to authenticated
-  using (business_id = auth_business_id() and auth_role() in ('titolare', 'responsabile'))
-  with check (business_id = auth_business_id() and auth_role() in ('titolare', 'responsabile'));
+create policy suppliers_select on suppliers for select to app_user
+  using (business_id = app_business_id());
+create policy suppliers_write on suppliers for all to app_user
+  using (business_id = app_business_id() and app_role() in ('titolare', 'responsabile'))
+  with check (business_id = app_business_id() and app_role() in ('titolare', 'responsabile'));
 
-create policy categories_select on categories for select to authenticated
-  using (business_id = auth_business_id());
-create policy categories_write on categories for all to authenticated
-  using (business_id = auth_business_id() and auth_role() in ('titolare', 'responsabile'))
-  with check (business_id = auth_business_id() and auth_role() in ('titolare', 'responsabile'));
+create policy categories_select on categories for select to app_user
+  using (business_id = app_business_id());
+create policy categories_write on categories for all to app_user
+  using (business_id = app_business_id() and app_role() in ('titolare', 'responsabile'))
+  with check (business_id = app_business_id() and app_role() in ('titolare', 'responsabile'));
 
-create policy products_select on products for select to authenticated
-  using (business_id = auth_business_id());
-create policy products_write on products for all to authenticated
-  using (business_id = auth_business_id() and auth_role() in ('titolare', 'responsabile'))
-  with check (business_id = auth_business_id() and auth_role() in ('titolare', 'responsabile'));
+create policy products_select on products for select to app_user
+  using (business_id = app_business_id());
+create policy products_write on products for all to app_user
+  using (business_id = app_business_id() and app_role() in ('titolare', 'responsabile'))
+  with check (business_id = app_business_id() and app_role() in ('titolare', 'responsabile'));
 
-create policy events_select on events for select to authenticated
-  using (business_id = auth_business_id());
-create policy events_write on events for all to authenticated
-  using (business_id = auth_business_id() and auth_role() in ('titolare', 'responsabile'))
-  with check (business_id = auth_business_id() and auth_role() in ('titolare', 'responsabile'));
+create policy events_select on events for select to app_user
+  using (business_id = app_business_id());
+create policy events_write on events for all to app_user
+  using (business_id = app_business_id() and app_role() in ('titolare', 'responsabile'))
+  with check (business_id = app_business_id() and app_role() in ('titolare', 'responsabile'));
 
 -- ---------------------------------------------------------------- lots
 -- Anyone with a session can register a carico (goods-in is everyone's job on
@@ -157,15 +158,14 @@ create policy events_write on events for all to authenticated
 -- touches the table, and to any INSERT that asks for a RETURNING clause:
 -- with no select policy at all, lots_update's own USING clause can never
 -- match a row (there is nothing for it to see), so a titolare's correction
--- silently matches zero rows - PostgREST reports that as success, not an
--- error - and `supabase.from('lots').insert(row).select('id')`, which the
--- app needs because a carico movement has to reference the new lot's id,
--- raises an RLS violation instead of returning it. An earlier version of
--- this file argued the absence of a select policy was deliberate, on the
--- theory that it was needed to protect the price; that reasoning was
--- wrong. The price is protected entirely by the column-level revoke below
--- (unit_price/document_url are not selectable by anyone, this policy or
--- no), not by making the whole table invisible.
+-- silently matches zero rows, and inserting a lot and reading its id back in
+-- the same round trip (the app needs that because a carico movement has to
+-- reference the new lot's id) raises an RLS violation instead of returning
+-- it. An earlier version of this file argued the absence of a select policy
+-- was deliberate, on the theory that it was needed to protect the price;
+-- that reasoning was wrong. The price is protected entirely by the
+-- column-level revoke below (unit_price/document_url are not selectable by
+-- anyone, this policy or no), not by making the whole table invisible.
 --
 -- created_by must match the caller, the same rule movements_insert applies
 -- below: it is not null and on delete restrict precisely because "who
@@ -180,25 +180,33 @@ create policy events_write on events for all to authenticated
 -- the traceability record in the same way a movement is: correcting a
 -- mistake goes through lots_update (or, once movements exist against it,
 -- through a reversal), not by removing the row.
-create policy lots_select on lots for select to authenticated
-  using (business_id = auth_business_id());
-create policy lots_insert on lots for insert to authenticated
-  with check (business_id = auth_business_id() and created_by = auth.uid());
-create policy lots_update on lots for update to authenticated
-  using (business_id = auth_business_id() and auth_role() in ('titolare', 'responsabile'))
-  with check (business_id = auth_business_id());
+create policy lots_select on lots for select to app_user
+  using (business_id = app_business_id());
+create policy lots_insert on lots for insert to app_user
+  with check (business_id = app_business_id() and created_by = app_user_id());
+create policy lots_update on lots for update to app_user
+  using (business_id = app_business_id() and app_role() in ('titolare', 'responsabile'))
+  with check (business_id = app_business_id());
 
 -- ---------------------------------------------------------------- movements
 -- Insert and select only. Never update or delete: the traceability record is
 -- immutable. Voiding a movement means inserting its reverse (see
 -- movements.reverses_id in 0001), not editing history.
 
-create policy movements_select on movements for select to authenticated
-  using (business_id = auth_business_id());
-create policy movements_insert on movements for insert to authenticated
-  with check (business_id = auth_business_id() and created_by = auth.uid());
+create policy movements_select on movements for select to app_user
+  using (business_id = app_business_id());
+create policy movements_insert on movements for insert to app_user
+  with check (business_id = app_business_id() and created_by = app_user_id());
 
 -- ---------------------------------------------------------------- grants
+-- Default privileges: app_user gets nothing it is not explicitly granted.
+grant select, insert, update on
+  businesses, profiles, invitations, suppliers, categories, products, events, movements
+  to app_user;
+-- lots keeps the column-scoped grants defined below; do not grant table-level here.
+grant select on lots_view, lot_stock, product_stock to app_user;
+grant usage on all sequences in schema public to app_user;
+
 -- The price and the supplier document never leave the database for an
 -- operatore. Hiding them in the client is not enough, so direct select on
 -- lots is revoked and select is granted back only on the columns that carry
@@ -214,18 +222,21 @@ create policy movements_insert on movements for insert to authenticated
 -- for every role, because neither column is granted to anyone; that failure
 -- happens at the privilege check, before RLS even runs, so it applies
 -- identically to titolare, responsabile and operatore. INSERT and UPDATE
--- privileges on lots are untouched by this revoke: they still come from the
--- default privileges Supabase grants new tables, so goods-in (insert) and
--- corrections (update) keep working for whichever role the RLS policies
--- above already allow.
-revoke select on lots from authenticated;
+-- privileges on lots are otherwise granted independently below: goods-in
+-- (insert) and corrections (update) keep working for whichever role the RLS
+-- policies above already allow. This revoke has to run after the table-level
+-- grant block above, or the table-level "grant ... update on ... lots" (not
+-- present above precisely because of this) would silently reopen what it
+-- closes; there is no table-level grant on lots anywhere in this file for
+-- that reason.
+revoke select on lots from app_user;
 grant select (
   id, business_id, product_id, supplier_id, lot_code,
   expires_on, received_on, created_by, created_at
-) on lots to authenticated;
+) on lots to app_user;
 
 -- lots_update's with check only re-tests business_id against
--- auth_business_id(), and only for the row's post-update value - it says
+-- app_business_id(), and only for the row's post-update value - it says
 -- nothing about created_by, and nothing stops the new business_id from
 -- being a different (still equal-to-itself-after-the-fact) value the
 -- caller chooses. Left to policy alone, a titolare or responsabile could
@@ -243,14 +254,13 @@ grant select (
 -- has been granted privileges on a table, then revoking the same
 -- privileges from individual columns will have no effect" - a column-level
 -- revoke cannot claw anything back from a broader table-level grant that
--- is still in force, and Supabase's default privileges grant UPDATE on the
--- whole table to authenticated. An earlier version of this file tried the
--- column-level revoke alone; it is a silent no-op (Postgres only warns),
--- so created_by stayed rewritable while the migration still applied
--- cleanly - exactly the kind of failure that looks fine until someone
--- checks. INSERT is untouched either way (lots_insert still sets
--- created_by/business_id when a lot is created); this only ever governs
--- UPDATE.
+-- is still in force. There is no table-level "grant ... update on ...
+-- lots" anywhere in this file, for exactly that reason: granting it and
+-- then revoking it here would depend on ordering that is easy to break by
+-- a future edit, where simply never granting it at the table level cannot
+-- be silently reopened. INSERT is untouched either way (lots_insert still
+-- sets created_by/business_id when a lot is created); this only ever
+-- governs UPDATE.
 --
 -- unit_price and document_url are deliberately in the grant-back list:
 -- UPDATE and SELECT are separate privileges, and a titolare correcting a
@@ -259,29 +269,17 @@ grant select (
 -- WHERE clause on a correction still works because SELECT on id and
 -- business_id is granted per column above, independent of this UPDATE
 -- grant.
-revoke update on lots from authenticated;
+revoke update on lots from app_user;
 grant update (
   product_id, supplier_id, lot_code, expires_on,
   unit_price, document_url, received_on
-) on lots to authenticated;
+) on lots to app_user;
+-- INSERT on lots is not covered by the table-level grant block above (lots
+-- is named there only for its column-scoped select/update); grant it
+-- explicitly here so lots_insert has something to allow.
+grant insert on lots to app_user;
 
--- authenticated reads lots through the view, never the base table.
-grant select on lots_view to authenticated;
-grant select on lot_stock to authenticated;
-grant select on product_stock to authenticated;
-
--- anon gets nothing on these views, on lots, or on any other table in this
--- file. An unauthenticated caller getting zero rows back would say "you
--- asked correctly and there is nothing here"; a permission error says "you
--- are not allowed to ask" - the second is the truth for a caller with no
--- session, and it is the one that fails loudly if a screen ever queries
--- before a session exists, rather than silently rendering an empty state
--- that looks like "no data yet". lots is named explicitly alongside the
--- three views: without this, anon keeps whatever default select privilege
--- Supabase grants new tables, unit_price and document_url included - RLS
--- alone would only be saving it because no policy above names anon, which
--- is not a property worth depending on. The revoke is explicit everywhere
--- here, not just an omitted grant, for the same reason: Supabase's default
--- privileges may otherwise hand anon select on a relation regardless of
--- what this file asks for.
-revoke select on lots, lots_view, lot_stock, product_stock from anon;
+-- app_user reads lots through the view, never the base table, for the
+-- price-bearing columns; the plain columns above are also reachable
+-- directly for lots_update/insert-then-read-it-back to work (see the
+-- lots_select comment above).

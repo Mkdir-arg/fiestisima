@@ -1,0 +1,32 @@
+[project]
+name = "api"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.28.1",
+    "psycopg[binary,pool]>=3.2",
+    "pwdlib[argon2]>=0.3.1",
+    "pydantic-settings>=2",
+    "pyjwt>=2.9",
+    "uvicorn[standard]>=0.53.0",
+]
+
+[dependency-groups]
+dev = [
+    "anyio>=4.15.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+# The connection pool is opened once per session (see tests/conftest.py's
+# _pool_lifecycle) and its background fill worker is bound to whichever
+# event loop was running when it was opened. Function-scoped loops (the
+# default) tear that loop down after the fixture that opened the pool,
+# leaving the worker orphaned and every later checkout to time out - hence
+# one event loop for the whole session.
+asyncio_default_fixture_loop_scope = "session"

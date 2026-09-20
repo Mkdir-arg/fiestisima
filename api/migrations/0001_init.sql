@@ -12,6 +12,15 @@ create type movement_type as enum ('carico', 'scarico_uso', 'scarico_vendita', '
 
 -- ---------------------------------------------------------------- tables
 
+-- The API's own identity table. Replaces auth.users: there is no Supabase
+-- Auth any more, so the API issues and verifies its own JWTs against this.
+create table users (
+  id uuid primary key default gen_random_uuid(),
+  email citext not null unique,
+  password_hash text not null,
+  created_at timestamptz not null default now()
+);
+
 create table businesses (
   id uuid primary key default gen_random_uuid(),
   name text not null,
@@ -22,7 +31,7 @@ create table businesses (
 );
 
 create table profiles (
-  id uuid primary key references auth.users (id) on delete cascade,
+  id uuid primary key references users (id) on delete cascade,
   business_id uuid not null references businesses (id) on delete cascade,
   full_name text not null,
   role user_role not null default 'operatore',
@@ -198,29 +207,60 @@ create index movements_lot_idx on movements (lot_id);
 create index movements_business_date_idx on movements (business_id, occurred_at desc);
 create index movements_event_idx on movements (event_id) where event_id is not null;
 
+-- ---------------------------------------------------------------- application role
+-- app_user replaces Supabase's `authenticated`. NOLOGIN: nobody connects as
+-- app_user directly, it is only ever assumed with `set local role` inside a
+-- transaction the API already opened as its owner (`fiestisima`, which owns
+-- every table above and therefore bypasses RLS by default - see db.py's
+-- as_owner()/as_user() for the only three places that matters).
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'app_user') then
+    create role app_user nologin;
+  end if;
+end $$;
+grant app_user to current_user;
+grant usage on schema public to app_user;
+
 -- ---------------------------------------------------------------- functions
 -- SECURITY DEFINER on purpose: these functions are used INSIDE the RLS
 -- policies on profiles. If they respected RLS, querying profiles to decide
 -- whether profiles may be queried would be infinite recursion.
+--
+-- Identity functions: they read the session setting the API fixes per
+-- request (see db.py's as_user()), replacing auth.uid()/auth_business_id()/
+-- auth_role(). nullif(..., '') plus current_setting's "missing_ok" true
+-- argument make app_user_id() resolve to NULL, not raise, when the setting
+-- is absent - which is exactly the owner-mode case (migrations, invitation
+-- acceptance, login) where no app.user_id is ever set.
 
-create or replace function auth_business_id()
+create or replace function app_user_id()
 returns uuid
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select business_id from profiles where id = auth.uid() and active
+  select nullif(current_setting('app.user_id', true), '')::uuid
 $$;
 
-create or replace function auth_role()
+create or replace function app_business_id()
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select business_id from profiles where id = app_user_id() and active
+$$;
+
+create or replace function app_role()
 returns user_role
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select role from profiles where id = auth.uid() and active
+  select role from profiles where id = app_user_id() and active
 $$;
 
 -- ---------------------------------------------------------------- views
@@ -228,7 +268,7 @@ $$;
 -- sync with the record.
 
 -- security_barrier on all three views below: they are deliberately not
--- security_invoker, so their own "where business_id = auth_business_id()"
+-- security_invoker, so their own "where business_id = app_business_id()"
 -- is the entire tenant boundary. Without security_barrier the planner may
 -- push a caller-supplied predicate ahead of that filter, and a cheap
 -- predicate that errors on the wrong input (or times differently) can leak
@@ -255,7 +295,7 @@ select
   ) as stock
 from lots l
 left join movements m on m.lot_id = l.id
-where l.business_id = auth_business_id()
+where l.business_id = app_business_id()
 group by l.id, l.business_id, l.product_id;
 
 create view product_stock with (security_barrier = true) as
@@ -279,10 +319,10 @@ select
   l.supplier_id,
   l.lot_code,
   l.expires_on,
-  case when auth_role() in ('titolare', 'responsabile') then l.document_url end as document_url,
+  case when app_role() in ('titolare', 'responsabile') then l.document_url end as document_url,
   l.received_on,
   l.created_by,
   l.created_at,
-  case when auth_role() in ('titolare', 'responsabile') then l.unit_price end as unit_price
+  case when app_role() in ('titolare', 'responsabile') then l.unit_price end as unit_price
 from lots l
-where l.business_id = auth_business_id();
+where l.business_id = app_business_id();
