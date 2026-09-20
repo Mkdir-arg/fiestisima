@@ -12,6 +12,7 @@ export const colors = {
   redTint: '#FFE5E3',
   amberText: '#9A5400',
   amberTint: '#FFF0D9',
+  chevron: '#C4C4C6',
 } as const;
 
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const;

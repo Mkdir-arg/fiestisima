@@ -2,9 +2,9 @@ import { TextInput, View, type TextInputProps } from 'react-native';
 import { Text } from './Text';
 import { colors, space, HIT_SIZE } from './tokens';
 
-type Props = TextInputProps & { label: string; error?: string };
+type Props = TextInputProps & { label: string };
 
-export function Field({ label, error, style, ...rest }: Props) {
+export function Field({ label, style, ...rest }: Props) {
   return (
     <View
       style={{
@@ -24,7 +24,7 @@ export function Field({ label, error, style, ...rest }: Props) {
         placeholderTextColor={colors.textTertiary}
         {...rest}
         style={[
-          { flex: 1, fontSize: 17, color: error ? colors.redText : colors.text, paddingVertical: 12 },
+          { flex: 1, fontSize: 17, color: colors.text, paddingVertical: 12 },
           style,
         ]}
       />

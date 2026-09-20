@@ -53,7 +53,7 @@ function Chevron() {
         height: 13,
         borderRightWidth: 2,
         borderTopWidth: 2,
-        borderColor: '#C4C4C6',
+        borderColor: colors.chevron,
         transform: [{ rotate: '45deg' }],
       }}
     />
