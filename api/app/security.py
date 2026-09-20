@@ -96,10 +96,16 @@ async def issue_refresh_token(conn, user_id: UUID) -> str:
     return raw
 
 
-async def rotate_refresh_token(conn, raw: str) -> tuple[UUID, str]:
-    """Looks the token up by hash, rejects it if missing/expired/revoked,
-    marks it revoked, and issues its replacement - all inside the caller's
-    transaction, so a failure here leaves nothing rotated."""
+async def resolve_refresh_token(conn, raw: str) -> tuple[UUID, UUID]:
+    """Looks a refresh token up by hash and validates it, without mutating
+    anything. Split out from rotate_refresh_token so a caller that also
+    needs to check something else about the user (routers/auth.py's
+    /refresh checks profiles.active) can do that check before deciding
+    whether to rotate at all - rotating first and then having to undo it
+    would not work, since undoing means raising inside the same
+    transaction that did the rotation, which rolls the rotation back too
+    (see the "own transaction" comments on _record_attempt and
+    revoke_all_refresh_tokens' call sites in routers/auth.py)."""
     token_hash = sha256_hex(raw)
     cur = await conn.execute(
         "select id, user_id, expires_at, revoked_at from refresh_tokens where token_hash = %s",
@@ -113,9 +119,34 @@ async def rotate_refresh_token(conn, raw: str) -> tuple[UUID, str]:
         raise RefreshTokenError("revoked")
     if expires_at < datetime.now(timezone.utc):
         raise RefreshTokenError("expired")
+    return token_id, user_id
 
+
+async def rotate_refresh_token(conn, raw: str) -> tuple[UUID, str]:
+    """Resolves, revokes, and reissues in one step - all inside the
+    caller's transaction, so a failure here leaves nothing rotated."""
+    token_id, user_id = await resolve_refresh_token(conn, raw)
     await conn.execute(
         "update refresh_tokens set revoked_at = now() where id = %s", (token_id,)
     )
     new_raw = await issue_refresh_token(conn, user_id)
     return user_id, new_raw
+
+
+async def revoke_all_refresh_tokens(conn, user_id: UUID) -> None:
+    """Revokes every refresh token a user currently holds. Used on a
+    successful password reset, and when /auth/refresh or
+    /auth/password/reset discover the profile was deactivated after the
+    token in hand was issued - a deactivated account must not be able to
+    keep minting access tokens for up to refresh_token_days.
+
+    TODO(task-4): also call this from PATCH /users/{id} when a titolare
+    deactivates a user, so an existing session cannot outlive the
+    deactivation by waiting out access_token_minutes instead of hitting
+    /auth/refresh at all.
+    """
+    await conn.execute(
+        "update refresh_tokens set revoked_at = now() "
+        "where user_id = %s and revoked_at is null",
+        (user_id,),
+    )

@@ -27,7 +27,8 @@ from ..security import (
     hash_password,
     issue_refresh_token,
     require_user,
-    rotate_refresh_token,
+    resolve_refresh_token,
+    revoke_all_refresh_tokens,
     sha256_hex,
     verify_password,
 )
@@ -135,6 +136,13 @@ async def _record_attempt(email: str, succeeded: bool) -> None:
 async def login(body: LoginRequest):
     # runs as owner: needs users.password_hash, which app_user cannot see.
     async with as_owner() as conn:
+        # Deliberately not self-extending: a request rejected here (423)
+        # is never itself inserted into login_attempts, so the lockout
+        # always expires 15 minutes after the 5th failure, however many
+        # more attempts land while it is in effect. docs/04 specifies
+        # "5 fallos -> 15 minutos"; if a rejected attempt also counted, a
+        # third party could keep the real owner locked out indefinitely
+        # just by continuing to hammer the endpoint.
         cur = await conn.execute(
             """
             select count(*) from login_attempts
@@ -185,21 +193,40 @@ async def login(body: LoginRequest):
 
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh(body: RefreshRequest):
-    # runs as owner: rotates a row in refresh_tokens, an owner-only table
-    # with no RLS and no grants to app_user.
+    # runs as owner: reads/writes refresh_tokens, an owner-only table with
+    # no RLS and no grants to app_user.
     async with as_owner() as conn:
         try:
-            user_id, new_raw = await rotate_refresh_token(conn, body.refresh_token)
+            token_id, user_id = await resolve_refresh_token(conn, body.refresh_token)
         except RefreshTokenError:
             raise HTTPException(status_code=401, detail="invalid_token")
 
         cur = await conn.execute(
-            "select business_id, role from profiles where id = %s", (user_id,)
+            "select business_id, role, active from profiles where id = %s", (user_id,)
         )
         row = await cur.fetchone()
         if row is None:
             raise HTTPException(status_code=401, detail="invalid_token")
-        business_id, role = row
+        business_id, role, active = row
+
+        if not active:
+            # The profile was deactivated some time after this refresh
+            # token was issued (up to refresh_token_days ago). Close the
+            # session now instead of handing out another access token:
+            # revoke every refresh token this user holds - in a
+            # transaction of its own, because raising the 403 right after
+            # would otherwise roll back a revoke made through `conn`
+            # along with everything else this as_owner() block did.
+            async with as_owner() as revoke_conn:
+                await revoke_all_refresh_tokens(revoke_conn, user_id)
+            raise HTTPException(status_code=403, detail="deactivated")
+
+        # Only mutate once the account is confirmed active: resolving the
+        # token above did not revoke or reissue anything yet.
+        await conn.execute(
+            "update refresh_tokens set revoked_at = now() where id = %s", (token_id,)
+        )
+        new_raw = await issue_refresh_token(conn, user_id)
 
         access_token = create_access_token(user_id, business_id, role)
         return RefreshResponse(access_token=access_token, refresh_token=new_raw)
@@ -284,6 +311,19 @@ async def reset_password(body: ResetPasswordRequest):
         if used_at is not None or expires_at < datetime.now(timezone.utc):
             raise HTTPException(status_code=401, detail="invalid_token")
 
+        cur = await conn.execute("select active from profiles where id = %s", (user_id,))
+        profile_row = await cur.fetchone()
+        active = profile_row[0] if profile_row is not None else False
+        if not active:
+            # Same reasoning as /auth/refresh: a deactivated account must
+            # not be able to set a new password or keep any session alive.
+            # Revoked in a transaction of its own so it survives the 403
+            # raised right after it, rather than being rolled back with
+            # the rest of this as_owner() block.
+            async with as_owner() as revoke_conn:
+                await revoke_all_refresh_tokens(revoke_conn, user_id)
+            raise HTTPException(status_code=403, detail="deactivated")
+
         new_hash = hash_password(body.password)
         await conn.execute(
             "update users set password_hash = %s where id = %s", (new_hash, user_id)
@@ -291,9 +331,5 @@ async def reset_password(body: ResetPasswordRequest):
         await conn.execute(
             "update password_resets set used_at = now() where id = %s", (reset_id,)
         )
-        await conn.execute(
-            "update refresh_tokens set revoked_at = now() "
-            "where user_id = %s and revoked_at is null",
-            (user_id,),
-        )
+        await revoke_all_refresh_tokens(conn, user_id)
     return {"ok": True}

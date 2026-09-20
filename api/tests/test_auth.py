@@ -83,6 +83,27 @@ async def test_refresh_rotates_and_old_token_then_fails(client, business):
     assert replay_resp.json()["detail"] == "invalid_token"
 
 
+async def test_refresh_rejects_a_user_deactivated_after_login(client, business):
+    login_resp = await _login(client, business.operatore_email, business.password)
+    refresh_token = login_resp.json()["refresh_token"]
+
+    async with as_owner() as conn:
+        await conn.execute(
+            "update profiles set active = false where id = %s", (business.operatore_id,)
+        )
+
+    first = await client.post("/auth/refresh", json={"refresh_token": refresh_token})
+    assert first.status_code == 403
+    assert first.json()["detail"] == "deactivated"
+
+    # The token was revoked as part of closing the session, not just
+    # rejected-and-left-alone: replaying it gets the ordinary revoked
+    # response, not a repeat of the deactivation check.
+    second = await client.post("/auth/refresh", json={"refresh_token": refresh_token})
+    assert second.status_code == 401
+    assert second.json()["detail"] == "invalid_token"
+
+
 async def test_logout_revokes_the_refresh_token(client, business):
     login_resp = await _login(client, business.titolare_email, business.password)
     refresh_token = login_resp.json()["refresh_token"]
@@ -200,3 +221,30 @@ async def test_reset_password_revokes_existing_refresh_tokens(client, business, 
 
     refresh_resp = await client.post("/auth/refresh", json={"refresh_token": refresh_token})
     assert refresh_resp.status_code == 401
+
+
+async def test_password_reset_rejects_a_user_deactivated_after_the_request(
+    client, business, caplog
+):
+    login_resp = await _login(client, business.titolare_email, business.password)
+    refresh_token = login_resp.json()["refresh_token"]
+
+    raw_token = await _forgot_and_capture_token(client, caplog, business.titolare_email)
+
+    async with as_owner() as conn:
+        await conn.execute(
+            "update profiles set active = false where id = %s", (business.titolare_id,)
+        )
+
+    first = await client.post(
+        "/auth/password/reset", json={"token": raw_token, "password": "Whatever-New-Pass-4"}
+    )
+    assert first.status_code == 403
+    assert first.json()["detail"] == "deactivated"
+
+    # The pre-existing session was closed as part of that rejection.
+    second_refresh = await client.post(
+        "/auth/refresh", json={"refresh_token": refresh_token}
+    )
+    assert second_refresh.status_code == 401
+    assert second_refresh.json()["detail"] == "invalid_token"
