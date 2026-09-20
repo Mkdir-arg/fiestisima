@@ -65,5 +65,6 @@ Estado real de las cuentas: hay Vercel. **No hay** cuenta de Supabase, ni Docker
 
 ## Seguridad y datos
 - Fotos de DDT en bucket privado; se sirven con URL firmada de 1 h.
-- Backups diarios de Supabase (incluidos en el plan).
 - Datos en la UE (región Frankfurt), relevante por GDPR.
+
+**Pregunta abierta — backups**: el plan gratuito de Supabase (el que se eligió arriba, en Entornos) no incluye backups automáticos; eso empieza en el plan pago. El registro de trazabilidad es un documento legal, así que hace falta alguna rutina de respaldo antes de apoyarse en el sistema para eso — no es opcional, sólo está sin decidir cuál. Las dos rutas son pasar al plan pago o programar un `pg_dump` propio; todavía no se eligió ninguna de las dos.

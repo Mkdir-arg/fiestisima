@@ -15,7 +15,7 @@ La columna "App iOS" describe la app nativa una vez exista cuenta de Apple Devel
 | | App iOS (futura) | Web |
 |---|---|---|
 | Escaneo con cámara | ✓ (nativo, `expo-camera`) | ✓ (librería JS) + lector USB / entrada manual |
-| OCR | Fase 2, requiere build nativo (ver doc 06) | — (imposible en navegador) |
+| OCR | No entra en la primera entrega: requiere build nativo (ver doc 06) | — (imposible en navegador) |
 | Push | ✓ (nativo) | ✓ desde iOS 16.4, instalada a pantalla de inicio + resumen en dashboard |
 | Face ID | ✓ | — |
 | Exportes | ✓ (share sheet) | ✓ (descarga) |

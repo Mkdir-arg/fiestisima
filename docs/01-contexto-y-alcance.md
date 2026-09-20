@@ -24,7 +24,7 @@ Que registrar una entrada de mercadería tome **menos de 30 segundos** por produ
 - App nativa iOS, mismo código, distribuida por TestFlight → App Store — pendiente de que exista una cuenta de Apple Developer (ver doc 14). Sin ella no hay OCR de etiqueta, que necesita un build nativo (ver doc 06).
 
 ## Qué está dentro del MVP
-Login e invitaciones · catálogo de productos · escaneo de código de barras · OCR de lote y fecha (Fase 2 mientras no haya cuenta de Apple, ver doc 06) · carico y scarico de lotes · scadenze con push · stock y mínimos · lista de compra · fornitori · registro de trazabilidad en PDF · web con dashboard · ABM de usuarios y roles.
+Login e invitaciones · catálogo de productos · escaneo de código de barras · OCR de lote y fecha (no entra en la primera entrega mientras no haya cuenta de Apple, ver doc 06) · carico y scarico de lotes · scadenze con push · stock y mínimos · lista de compra · fornitori · registro de trazabilidad en PDF · web con dashboard · ABM de usuarios y roles.
 
 ## Qué queda fuera del MVP (ver Roadmap)
 Escaneo de fattura completa · QR interno para preparaciones propias · offline completo · registro de temperaturas · alérgenos · facturación o ventas · integración con caja (POS).

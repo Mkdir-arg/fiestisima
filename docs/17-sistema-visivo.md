@@ -37,7 +37,7 @@ Seis piezas, sin conocimiento del dominio: reciben props y dibujan, nunca import
 
 - **`Text`** — envoltorio de `Text` de React Native. Toma `variant` (una de las siete escalas de arriba) y `tone` (`primary` · `secondary` · `tertiary` · `blue` · `red` · `amber`), y resuelve el color desde los tokens.
 - **`Button`** — `title`, `onPress`, `variant` (`primary` · `secondary` · `destructive`), `disabled`, `loading`. Altura mínima `HIT_SIZE`. El primario es azul con texto blanco; el secundario usa `fill`; el destructivo usa `redTint` con texto rojo.
-- **`Field`** — campo de formulario con etiqueta a la izquierda y `TextInput` a la derecha (recibe cualquier prop de `TextInputProps`). No tiene una prop `error`: se decidió durante la implementación que ningún consumidor la necesitaba todavía, y una prop a medio implementar es peor que no tenerla — el error de un campo se muestra hoy como texto aparte, cuando hace falta.
+- **`Field`** — campo de formulario con etiqueta a la izquierda y `TextInput` a la derecha (recibe cualquier prop de `TextInputProps`). No tiene una prop `error`; el error de un campo se muestra hoy como texto aparte, cuando hace falta.
 - **`ListGroup`** — agrupa filas sobre una superficie blanca con separadores finos entre ellas, más `header` y `footer` opcionales. Es la lista agrupada del lenguaje iOS.
 - **`ListRow`** — una fila dentro de un `ListGroup`: `title`, `subtitle` opcional, contenido `right` libre, y una flecha (`chevron`) cuando la fila tiene `onPress`.
 - **`StatusPill`** — la pastilla de vencimiento. Recibe `daysLeft` ya calculado (no importa `lotStatus`, que vive en `src/lib/`) y un `thresholdDays`. Vencido: rojo. Por vencer dentro del umbral: ámbar. En orden: `fill`, sin color propio.
