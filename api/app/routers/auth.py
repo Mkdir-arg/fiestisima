@@ -24,6 +24,13 @@ and failure paths on the one `conn` the block already holds, record which
 HTTPException (if any) applies in a plain local variable, let the block
 exit normally (which commits), and only then raise or return based on
 that variable.
+
+Exception: a block that only reads never needs this dance - there is
+nothing pending to commit that a raised exception could lose, so a
+read-only as_owner()/as_user() block (GET /invitations/{token} and
+GET /businesses/me, for instance) may raise HTTPException directly inside
+it. The rule above is really about not discarding an unfinished write, not
+about the `raise` keyword itself.
 """
 import secrets
 from datetime import datetime, timedelta, timezone

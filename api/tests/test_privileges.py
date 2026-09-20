@@ -108,6 +108,25 @@ async def test_profiles_role_guard_trigger_only_fires_on_update(owner):
     assert [r[0] for r in rows] == ["UPDATE"]
 
 
+async def test_app_user_still_has_no_select_on_users_table(owner):
+    # business_users (0006) exists precisely so GET /users never needs
+    # direct access to users, where password_hash lives - the view is the
+    # only door, and it carries no such column to leak through.
+    cur = await owner.execute(
+        "select has_table_privilege('app_user', 'public.users', 'SELECT')"
+    )
+    (has_select,) = await cur.fetchone()
+    assert has_select is False
+
+
+async def test_app_user_has_select_on_business_users_view(owner):
+    cur = await owner.execute(
+        "select has_table_privilege('app_user', 'public.business_users', 'SELECT')"
+    )
+    (has_select,) = await cur.fetchone()
+    assert has_select is True
+
+
 @pytest.mark.parametrize(
     "table", ["users", "refresh_tokens", "login_attempts", "password_resets"]
 )

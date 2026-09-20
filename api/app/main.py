@@ -8,6 +8,9 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .db import pool, as_owner
 from .routers.auth import router as auth_router
+from .routers.businesses import router as businesses_router
+from .routers.invitations import router as invitations_router
+from .routers.users import router as users_router
 
 
 @asynccontextmanager
@@ -40,7 +43,20 @@ async def unique_violation_handler(request: Request, exc: psycopg.errors.UniqueV
     return JSONResponse(status_code=409, content={"detail": "conflict"})
 
 
+@app.exception_handler(psycopg.errors.ForeignKeyViolation)
+async def foreign_key_violation_handler(request: Request, exc: psycopg.errors.ForeignKeyViolation):
+    return JSONResponse(status_code=409, content={"detail": "conflict"})
+
+
+@app.exception_handler(psycopg.errors.CheckViolation)
+async def check_violation_handler(request: Request, exc: psycopg.errors.CheckViolation):
+    return JSONResponse(status_code=422, content={"detail": "invalid"})
+
+
 app.include_router(auth_router)
+app.include_router(invitations_router)
+app.include_router(users_router)
+app.include_router(businesses_router)
 
 
 @app.get("/health")

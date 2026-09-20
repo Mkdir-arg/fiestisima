@@ -86,28 +86,22 @@ async def _insert_user_profile(conn, business_id, role: str, suffix: str) -> tup
     return user_id, email
 
 
-@pytest.fixture
-async def business():
-    """A throwaway business with a titolare, a responsabile and an
-    operatore, each with a real profile. Random suffix per run so the
-    suite can be re-run against the same database indefinitely."""
+async def _create_business_with_profiles(conn, label: str) -> SimpleNamespace:
     suffix = uuid.uuid4().hex[:8]
+    cur = await conn.execute(
+        "insert into businesses (name) values (%s) returning id",
+        (f"Test business {label} {suffix}",),
+    )
+    row = await cur.fetchone()
+    business_id = row[0]
 
-    async with as_owner() as conn:
-        cur = await conn.execute(
-            "insert into businesses (name) values (%s) returning id",
-            (f"Test business {suffix}",),
-        )
-        row = await cur.fetchone()
-        business_id = row[0]
+    titolare_id, titolare_email = await _insert_user_profile(conn, business_id, "titolare", suffix)
+    responsabile_id, responsabile_email = await _insert_user_profile(
+        conn, business_id, "responsabile", suffix
+    )
+    operatore_id, operatore_email = await _insert_user_profile(conn, business_id, "operatore", suffix)
 
-        titolare_id, titolare_email = await _insert_user_profile(conn, business_id, "titolare", suffix)
-        responsabile_id, responsabile_email = await _insert_user_profile(
-            conn, business_id, "responsabile", suffix
-        )
-        operatore_id, operatore_email = await _insert_user_profile(conn, business_id, "operatore", suffix)
-
-    data = SimpleNamespace(
+    return SimpleNamespace(
         business_id=business_id,
         titolare_id=titolare_id,
         responsabile_id=responsabile_id,
@@ -121,8 +115,8 @@ async def business():
         password=TEST_PASSWORD,
     )
 
-    yield data
 
+async def _teardown_business(data: SimpleNamespace) -> None:
     # Dependency order: movements -> lots -> profiles -> users -> businesses.
     # profiles.id already cascades from users, and businesses cascades to
     # profiles/lots/movements on its own, but lots/movements are "on delete
@@ -131,21 +125,23 @@ async def business():
     # abort on the still-referenced rows. Explicit order avoids that and
     # makes a teardown regression fail loudly, one assertion per step.
     async with as_owner() as conn:
-        # This fixture never creates lots or movements itself, so both
-        # deletes are guaranteed to affect zero rows here - asserted as
+        # These two deletes are guaranteed to affect zero rows for any
+        # fixture that never creates lots or movements itself - asserted as
         # such rather than "rowcount is not None", which DELETE always
         # satisfies (0, not None) and so proves nothing about the delete
         # actually running.
         result = await conn.execute(
-            "delete from movements where business_id = %s", (business_id,)
+            "delete from movements where business_id = %s", (data.business_id,)
         )
         assert result.rowcount == 0, f"expected no movements, got {result.rowcount}"
 
-        result = await conn.execute("delete from lots where business_id = %s", (business_id,))
+        result = await conn.execute(
+            "delete from lots where business_id = %s", (data.business_id,)
+        )
         assert result.rowcount == 0, f"expected no lots, got {result.rowcount}"
 
         result = await conn.execute(
-            "delete from profiles where business_id = %s", (business_id,)
+            "delete from profiles where business_id = %s", (data.business_id,)
         )
         assert result.rowcount == 3, f"expected 3 profiles deleted, got {result.rowcount}"
 
@@ -154,5 +150,28 @@ async def business():
         )
         assert result.rowcount == 3, f"expected 3 users deleted, got {result.rowcount}"
 
-        result = await conn.execute("delete from businesses where id = %s", (business_id,))
+        result = await conn.execute(
+            "delete from businesses where id = %s", (data.business_id,)
+        )
         assert result.rowcount == 1, "business teardown did not run"
+
+
+@pytest.fixture
+async def business():
+    """A throwaway business with a titolare, a responsabile and an
+    operatore, each with a real profile. Random suffix per run so the
+    suite can be re-run against the same database indefinitely."""
+    async with as_owner() as conn:
+        data = await _create_business_with_profiles(conn, "a")
+    yield data
+    await _teardown_business(data)
+
+
+@pytest.fixture
+async def other_business():
+    """A second, independent business - for cross-tenant checks (a token
+    from `business` must never reach these rows, and vice versa)."""
+    async with as_owner() as conn:
+        data = await _create_business_with_profiles(conn, "b")
+    yield data
+    await _teardown_business(data)

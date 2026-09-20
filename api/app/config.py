@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     site_url: str = "http://localhost:8081"
     cors_origins: list[str] = ["http://localhost:8081"]
     resend_api_key: str | None = None
+    mail_from: str = "Fiestisima <noreply@fiestisima.local>"
     access_token_minutes: int = 15
     refresh_token_days: int = 30
 

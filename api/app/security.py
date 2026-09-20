@@ -146,15 +146,14 @@ async def rotate_refresh_token(conn, raw: str) -> tuple[UUID, str]:
 
 async def revoke_all_refresh_tokens(conn, user_id: UUID) -> None:
     """Revokes every refresh token a user currently holds. Used on a
-    successful password reset, and when /auth/refresh or
-    /auth/password/reset discover the profile was deactivated after the
-    token in hand was issued - a deactivated account must not be able to
-    keep minting access tokens for up to refresh_token_days.
-
-    TODO(task-4): also call this from PATCH /users/{id} when a titolare
-    deactivates a user, so an existing session cannot outlive the
-    deactivation by waiting out access_token_minutes instead of hitting
-    /auth/refresh at all.
+    successful password reset, when /auth/refresh or /auth/password/reset
+    discover the profile was deactivated after the token in hand was
+    issued, and by PATCH /users/{id} right after a titolare deactivates a
+    user (in its own as_owner() block, after the as_user() block that made
+    the change has already committed - see routers/users.py) - a
+    deactivated account must not be able to keep minting access tokens for
+    up to refresh_token_days, or outlive the deactivation for
+    access_token_minutes by never calling /auth/refresh at all.
     """
     await conn.execute(
         "update refresh_tokens set revoked_at = now() "
