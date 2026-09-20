@@ -56,6 +56,7 @@ dev = [
     { name = "anyio" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
@@ -74,6 +75,7 @@ dev = [
     { name = "anyio", specifier = ">=4.15.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
+    { name = "python-dotenv", specifier = ">=1.2.3" },
 ]
 
 [[package]]

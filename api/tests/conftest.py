@@ -102,13 +102,18 @@ async def business():
     # abort on the still-referenced rows. Explicit order avoids that and
     # makes a teardown regression fail loudly, one assertion per step.
     async with as_owner() as conn:
+        # This fixture never creates lots or movements itself, so both
+        # deletes are guaranteed to affect zero rows here - asserted as
+        # such rather than "rowcount is not None", which DELETE always
+        # satisfies (0, not None) and so proves nothing about the delete
+        # actually running.
         result = await conn.execute(
             "delete from movements where business_id = %s", (business_id,)
         )
-        assert result.rowcount is not None, "movements teardown did not run"
+        assert result.rowcount == 0, f"expected no movements, got {result.rowcount}"
 
         result = await conn.execute("delete from lots where business_id = %s", (business_id,))
-        assert result.rowcount is not None, "lots teardown did not run"
+        assert result.rowcount == 0, f"expected no lots, got {result.rowcount}"
 
         result = await conn.execute(
             "delete from profiles where business_id = %s", (business_id,)

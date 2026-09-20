@@ -54,18 +54,45 @@ async def test_lots_table_level_insert_is_granted(owner):
 
 
 async def test_movements_has_no_update_or_delete_policy(owner):
-    # The traceability record is immutable: only select/insert policies may
-    # exist on movements. cmd = 'ALL' is also disallowed, since a policy
-    # declared "for all" would silently cover update/delete too.
+    # The traceability record is immutable: exactly select/insert, nothing
+    # else. Asserted as the exact set, not just "no UPDATE/DELETE/ALL rows"
+    # - the earlier version of this filtered the query itself, so it would
+    # have passed unchanged against an empty result from a query typo or a
+    # dropped policy, not just against the real absence of a write policy.
     cur = await owner.execute(
         """
         select policyname, cmd from pg_policies
         where schemaname = 'public' and tablename = 'movements'
-          and cmd in ('UPDATE', 'DELETE', 'ALL')
         """
     )
     rows = await cur.fetchall()
-    assert rows == []
+    assert set(rows) == {("movements_select", "SELECT"), ("movements_insert", "INSERT")}
+
+
+async def test_delete_is_scoped_to_invitations_and_categories(owner):
+    # 0004's ruling: cancelling an invitation and removing a free-text
+    # category label are the only real deletes in the schema. Everything
+    # else is either soft-deleted (products, suppliers) or was never
+    # deletable to begin with (events, lots, movements, profiles,
+    # businesses) - see 0004's own comment for the reasoning per table.
+    cur = await owner.execute(
+        """
+        select
+          has_table_privilege('app_user', 'public.invitations', 'DELETE'),
+          has_table_privilege('app_user', 'public.categories', 'DELETE'),
+          has_table_privilege('app_user', 'public.products', 'DELETE'),
+          has_table_privilege('app_user', 'public.suppliers', 'DELETE'),
+          has_table_privilege('app_user', 'public.events', 'DELETE'),
+          has_table_privilege('app_user', 'public.lots', 'DELETE'),
+          has_table_privilege('app_user', 'public.movements', 'DELETE'),
+          has_table_privilege('app_user', 'public.profiles', 'DELETE'),
+          has_table_privilege('app_user', 'public.businesses', 'DELETE')
+        """
+    )
+    invitations, categories, *closed = await cur.fetchone()
+    assert invitations is True
+    assert categories is True
+    assert all(privilege is False for privilege in closed)
 
 
 async def test_profiles_role_guard_trigger_only_fires_on_update(owner):
@@ -143,3 +170,23 @@ async def test_operatore_can_read_own_business_through_rls(business):
         )
         row = await cur.fetchone()
         assert row is not None and row[0] == business.business_id
+
+
+async def test_owner_fixture_and_as_user_share_one_event_loop(owner, business):
+    # Regression guard for fix-round-1 finding 1: pytest-asyncio 1.4
+    # defaults the *test* loop scope to "function", separate from the
+    # *fixture* loop scope pyproject.toml already pinned to "session". A
+    # test that holds a fixture-provided connection (owner) and also opens
+    # its own as_user() transaction in the same body - exactly Task 4's
+    # endpoint-test shape - would run on a per-test loop while the pool's
+    # background worker lives on the session loop, and hang for 30s before
+    # raising PoolTimeout. asyncio_default_test_loop_scope = "session" is
+    # what keeps both fixture and test on the same loop as the pool.
+    cur = await owner.execute("select 1")
+    (one,) = await cur.fetchone()
+    assert one == 1
+
+    async with as_user(business.titolare_id) as conn:
+        cur = await conn.execute("select app_role()")
+        (role,) = await cur.fetchone()
+        assert role == "titolare"

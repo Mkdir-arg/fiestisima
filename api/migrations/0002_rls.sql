@@ -115,7 +115,8 @@ before update on profiles
 for each row execute function profiles_block_self_role_change();
 
 -- ---------------------------------------------------------------- invitations
--- Only the titolare invites, sees pending invitations, or revokes them.
+-- Only the titolare invites, sees pending invitations, or cancels
+-- (deletes) them.
 
 create policy invitations_all on invitations for all to app_user
   using (business_id = app_business_id() and app_role() = 'titolare')
@@ -200,6 +201,14 @@ create policy movements_insert on movements for insert to app_user
 
 -- ---------------------------------------------------------------- grants
 -- Default privileges: app_user gets nothing it is not explicitly granted.
+-- DELETE is deliberately absent from this block too: of everything listed
+-- below, only invitations (cancelling one) and categories (a free label
+-- whose every reference is "on delete set null") are ever actually
+-- deletable - that grant lives in 0004, added after 0002 was already
+-- applied. Everything else stays closed: products/suppliers are
+-- soft-deleted (active = false), events and lots/movements/profiles/
+-- businesses were never deletable in the first place (see their own
+-- policy comments above and in 0001).
 grant select, insert, update on
   businesses, profiles, invitations, suppliers, categories, products, events, movements
   to app_user;
@@ -254,7 +263,12 @@ grant select (
 -- has been granted privileges on a table, then revoking the same
 -- privileges from individual columns will have no effect" - a column-level
 -- revoke cannot claw anything back from a broader table-level grant that
--- is still in force. There is no table-level "grant ... update on ...
+-- is still in force, and Supabase's default privileges grant UPDATE on the
+-- whole table to app_user. An earlier version of this file tried the
+-- column-level revoke alone; it is a silent no-op (Postgres only warns),
+-- so created_by stayed rewritable while the migration still applied
+-- cleanly - exactly the kind of failure that looks fine until someone
+-- checks. There is no table-level "grant ... update on ...
 -- lots" anywhere in this file, for exactly that reason: granting it and
 -- then revoking it here would depend on ordering that is easy to break by
 -- a future edit, where simply never granting it at the table level cannot

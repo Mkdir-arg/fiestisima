@@ -18,6 +18,7 @@ dev = [
     "anyio>=4.15.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "python-dotenv>=1.2.3",
 ]
 
 [tool.pytest.ini_options]
@@ -28,5 +29,9 @@ pythonpath = ["."]
 # event loop was running when it was opened. Function-scoped loops (the
 # default) tear that loop down after the fixture that opened the pool,
 # leaving the worker orphaned and every later checkout to time out - hence
-# one event loop for the whole session.
+# one event loop for the whole session. Both settings are needed: the
+# fixture scope covers fixtures like `owner`, the test scope covers a test
+# body itself entering as_user()/as_owner() directly (no fixture in
+# between) on what would otherwise be its own per-function loop.
 asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
