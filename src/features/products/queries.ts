@@ -13,7 +13,11 @@ type ProductOut = components['schemas']['ProductOut'];
 export type Product = Omit<ProductOut, 'min_stock'> & { min_stock: number };
 
 export function parseProduct(raw: ProductOut): Product {
-  return { ...raw, min_stock: Number(raw.min_stock) };
+  const min_stock = Number(raw.min_stock);
+  if (!Number.isFinite(min_stock)) {
+    throw new Error(`Product ${raw.id} has a non-numeric min_stock: "${raw.min_stock}"`);
+  }
+  return { ...raw, min_stock };
 }
 
 export function useProducts(search = '', includeInactive = false) {

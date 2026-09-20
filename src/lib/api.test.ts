@@ -35,10 +35,26 @@ describe('api', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer acc-1');
   });
 
-  it('refreshes once on 401 and retries the original request', async () => {
-    mockedTokenStorage.getTokens.mockResolvedValue({ access: 'stale', refresh: 'ref-1' });
+  it('unwraps FastAPI\'s {"detail": ...} envelope into ApiError.detail', async () => {
+    mockedTokenStorage.getTokens.mockResolvedValue(null);
+    (global.fetch as jest.Mock).mockResolvedValue(
+      jsonResponse(409, { detail: { code: 'barcode_taken', name: 'Farina 00' } }),
+    );
+
+    const err = await api.post('/products', { name: 'x' }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect(detailCode(err)).toBe('barcode_taken');
+    expect((err as ApiError).detail).toEqual({ code: 'barcode_taken', name: 'Farina 00' });
+  });
+
+  it('refreshes once on 401 and retries the original request with the new bearer', async () => {
+    mockedTokenStorage.getTokens
+      .mockResolvedValueOnce({ access: 'stale', refresh: 'ref-1' }) // original request
+      .mockResolvedValueOnce({ access: 'stale', refresh: 'ref-1' }) // re-check before refreshing
+      .mockResolvedValue({ access: 'fresh', refresh: 'ref-2' }); // retried request, after refresh
     (global.fetch as jest.Mock)
-      .mockResolvedValueOnce(jsonResponse(401, 'invalid_token')) // original request
+      .mockResolvedValueOnce(jsonResponse(401, { detail: 'invalid_token' })) // original request
       .mockResolvedValueOnce(jsonResponse(200, { access_token: 'fresh', refresh_token: 'ref-2' })) // refresh
       .mockResolvedValueOnce(jsonResponse(200, { id: '1' })); // retried request
 
@@ -47,6 +63,8 @@ describe('api', () => {
     expect(result).toEqual({ id: '1' });
     expect(global.fetch).toHaveBeenCalledTimes(3);
     expect(mockedTokenStorage.setTokens).toHaveBeenCalledWith({ access: 'fresh', refresh: 'ref-2' });
+    const [, retryInit] = (global.fetch as jest.Mock).mock.calls[2] as [string, RequestInit];
+    expect((retryInit.headers as Record<string, string>).Authorization).toBe('Bearer fresh');
   });
 
   it('deduplicates two concurrent 401s into a single refresh call', async () => {
@@ -62,7 +80,9 @@ describe('api', () => {
       }
       const count = (nonRefreshCallsPerPath.get(url) ?? 0) + 1;
       nonRefreshCallsPerPath.set(url, count);
-      return Promise.resolve(count === 1 ? jsonResponse(401, 'invalid_token') : jsonResponse(200, { ok: true }));
+      return Promise.resolve(
+        count === 1 ? jsonResponse(401, { detail: 'invalid_token' }) : jsonResponse(200, { ok: true }),
+      );
     });
 
     await Promise.all([api.get('/a'), api.get('/b')]);
@@ -70,14 +90,72 @@ describe('api', () => {
     expect(refreshCalls).toBe(1);
   });
 
+  it('does not start a second refresh when another request already rotated the tokens', async () => {
+    // Simulates the real race: two requests read the same (soon-to-be-stale)
+    // pair; A's 401 arrives first and refreshes; B's 401 for its OWN request
+    // (made with the same original token) only arrives after the rotation
+    // has already happened. B must retry with the rotated token instead of
+    // calling /auth/refresh again with its now-stale refresh token.
+    let stored = { access: 'stale', refresh: 'ref-1' };
+    let markRotated!: () => void;
+    const rotated = new Promise<void>((resolve) => {
+      markRotated = resolve;
+    });
+    mockedTokenStorage.getTokens.mockImplementation(() => Promise.resolve(stored));
+    mockedTokenStorage.setTokens.mockImplementation((pair: { access: string; refresh: string }) => {
+      stored = pair;
+      markRotated();
+      return Promise.resolve();
+    });
+
+    let refreshCalls = 0;
+    const callsPerPath = new Map<string, number>();
+    (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      if (url.endsWith('/auth/refresh')) {
+        refreshCalls += 1;
+        return Promise.resolve(jsonResponse(200, { access_token: 'fresh', refresh_token: 'ref-2' }));
+      }
+      const count = (callsPerPath.get(url) ?? 0) + 1;
+      callsPerPath.set(url, count);
+      if (url.endsWith('/b') && count === 1) {
+        return rotated.then(() => jsonResponse(401, { detail: 'invalid_token' }));
+      }
+      return Promise.resolve(
+        count === 1 ? jsonResponse(401, { detail: 'invalid_token' }) : jsonResponse(200, { ok: true }),
+      );
+    });
+
+    await Promise.all([api.get('/a'), api.get('/b')]);
+
+    expect(refreshCalls).toBe(1);
+    const bRetryCall = (global.fetch as jest.Mock).mock.calls.find(
+      ([url, init]: [string, RequestInit]) =>
+        url.endsWith('/b') && (init.headers as Record<string, string>).Authorization === 'Bearer fresh',
+    );
+    expect(bRetryCall).toBeDefined();
+  });
+
   it('clears tokens and throws ApiError(401) when the refresh itself is rejected', async () => {
     mockedTokenStorage.getTokens.mockResolvedValue({ access: 'stale', refresh: 'bad-refresh' });
     (global.fetch as jest.Mock)
-      .mockResolvedValueOnce(jsonResponse(401, 'invalid_token')) // original request
-      .mockResolvedValueOnce(jsonResponse(401, 'invalid_token')); // refresh fails too
+      .mockResolvedValueOnce(jsonResponse(401, { detail: 'invalid_token' })) // original request
+      .mockResolvedValueOnce(jsonResponse(401, { detail: 'invalid_token' })); // refresh fails too
 
     await expect(api.get('/products')).rejects.toMatchObject({ status: 401 });
     expect(mockedTokenStorage.clear).toHaveBeenCalled();
+  });
+
+  it('never attaches a bearer or triggers a refresh for an auth:false call, even on 401', async () => {
+    mockedTokenStorage.getTokens.mockResolvedValue({ access: 'stale', refresh: 'ref-1' });
+    (global.fetch as jest.Mock).mockResolvedValue(jsonResponse(401, { detail: 'invalid_credentials' }));
+
+    await expect(
+      api.post('/auth/login', { email: 'a@b.com', password: 'x' }, { auth: false }),
+    ).rejects.toMatchObject({ status: 401, detail: 'invalid_credentials' });
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [, init] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
   });
 
   describe('detailCode', () => {

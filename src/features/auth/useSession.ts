@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, detailCode } from '@/src/lib/api';
 import { tokenStorage } from '@/src/lib/tokenStorage';
+import { signOut } from './api';
 import type { components } from '@/src/types/api';
 
 export type Profile = components['schemas']['ProfileOut'];
@@ -51,12 +52,17 @@ export function useSession() {
     tokenStorage.clear().then(() => {
       setSession(null);
     });
-    // Not queryClient.removeQueries: with `enabled` still true during this
-    // render (it flips on the next one, once `session` commits to null),
-    // removing the query here would make the observer refetch immediately
-    // and re-trigger this same effect — an infinite loop. Disabling via
-    // `session` is enough; the stale errored data is harmless once unused.
   }, [meQuery.isError, meQuery.error]);
+
+  useEffect(() => {
+    // Once there is no session — whether from the error effect above or
+    // from a caller nulling it out — drop the cached profile too. Without
+    // this, a stale `['me']` entry can keep answering `meQuery.data` after
+    // sign-out/deactivation until something else happens to refetch it.
+    if (session === null) {
+      queryClient.removeQueries({ queryKey: ['me'] });
+    }
+  }, [session, queryClient]);
 
   const refresh = useCallback(async () => {
     setDeactivated(false);
@@ -66,9 +72,27 @@ export function useSession() {
 
   return {
     session,
-    profile: meQuery.data ?? null,
+    // Never surface a cached profile once there is no session: react-query
+    // keeps the last successful `data` around after an error unless the
+    // query is removed, which would otherwise flash the previous user's
+    // profile for a tick after sign-out or deactivation.
+    profile: session ? meQuery.data ?? null : null,
     isLoading: !checked || (Boolean(session) && meQuery.isLoading),
     deactivated,
     refresh,
   };
+}
+
+/**
+ * Signs out and drops every cached query, not just `['me']` — otherwise the
+ * next person to sign in on this device (or this same person signing back
+ * in) would see the previous session's `['products']` etc. flash before
+ * being refetched.
+ */
+export function useSignOut() {
+  const queryClient = useQueryClient();
+  return useCallback(async () => {
+    await signOut();
+    queryClient.clear();
+  }, [queryClient]);
 }

@@ -39,6 +39,20 @@ export function detailCode(err: unknown): string | null {
   return null;
 }
 
+/**
+ * FastAPI's default error handler always wraps the payload as
+ * `{"detail": ...}` — `{"detail":"invalid_credentials"}`,
+ * `{"detail":{"code":"barcode_taken","name":"..."}}`, or a pydantic 422's
+ * `{"detail":[...]}`. Only error bodies are wrapped this way (a 2xx body is
+ * never touched), so this is only ever applied where `!response.ok`.
+ */
+function extractDetail(body: unknown): unknown {
+  if (body && typeof body === 'object' && 'detail' in body) {
+    return (body as { detail: unknown }).detail;
+  }
+  return body;
+}
+
 type RefreshResponse = paths['/auth/refresh']['post']['responses'][200]['content']['application/json'];
 
 /**
@@ -59,7 +73,7 @@ async function doRefresh(refreshToken: string): Promise<string> {
   const body = await parseBody(response);
   if (!response.ok) {
     await tokenStorage.clear();
-    throw new ApiError(response.status, body);
+    throw new ApiError(response.status, extractDetail(body));
   }
   const pair = body as RefreshResponse;
   await tokenStorage.setTokens({ access: pair.access_token, refresh: pair.refresh_token });
@@ -89,10 +103,20 @@ async function parseBody(response: Response): Promise<unknown> {
 type RequestOptions = {
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   body?: unknown;
+  /**
+   * false for endpoints that are public or ARE the auth handshake itself
+   * (login, refresh, logout, password reset, invitation preview/accept):
+   * no bearer is attached, and a 401 from one of these never triggers a
+   * refresh-and-retry (a wrong password on /auth/login with stale tokens
+   * still lying around must surface `invalid_credentials`, not bounce
+   * through a token refresh and come back as `invalid_token`).
+   */
+  auth?: boolean;
 };
 
 async function request<T>(path: string, options: RequestOptions, isRetry = false): Promise<T> {
-  const tokens = await tokenStorage.getTokens();
+  const useAuth = options.auth !== false;
+  const tokens = useAuth ? await tokenStorage.getTokens() : null;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (tokens) {
     headers.Authorization = `Bearer ${tokens.access}`;
@@ -104,7 +128,17 @@ async function request<T>(path: string, options: RequestOptions, isRetry = false
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
 
-  if (response.status === 401 && !isRetry && tokens) {
+  if (useAuth && response.status === 401 && !isRetry && tokens) {
+    // Another request may have already refreshed while this one was in
+    // flight: re-read storage before refreshing again. If the stored access
+    // token no longer matches what this request sent, someone else already
+    // rotated it — retry with the new one instead of calling /auth/refresh
+    // a second time with our now-stale (single-use) refresh token, which
+    // would itself 401 and log the user out.
+    const stored = await tokenStorage.getTokens();
+    if (stored && stored.access !== tokens.access) {
+      return request<T>(path, options, true);
+    }
     try {
       await refreshAccessToken(tokens.refresh);
     } catch (err) {
@@ -116,22 +150,24 @@ async function request<T>(path: string, options: RequestOptions, isRetry = false
 
   const body = await parseBody(response);
   if (!response.ok) {
-    throw new ApiError(response.status, body);
+    throw new ApiError(response.status, extractDetail(body));
   }
   return body as T;
 }
 
+type CallOptions = { auth?: boolean };
+
 export const api = {
-  get<T>(path: string): Promise<T> {
-    return request<T>(path, { method: 'GET' });
+  get<T>(path: string, options: CallOptions = {}): Promise<T> {
+    return request<T>(path, { method: 'GET', auth: options.auth });
   },
-  post<T>(path: string, body?: unknown): Promise<T> {
-    return request<T>(path, { method: 'POST', body });
+  post<T>(path: string, body?: unknown, options: CallOptions = {}): Promise<T> {
+    return request<T>(path, { method: 'POST', body, auth: options.auth });
   },
-  patch<T>(path: string, body?: unknown): Promise<T> {
-    return request<T>(path, { method: 'PATCH', body });
+  patch<T>(path: string, body?: unknown, options: CallOptions = {}): Promise<T> {
+    return request<T>(path, { method: 'PATCH', body, auth: options.auth });
   },
-  del(path: string): Promise<void> {
-    return request<void>(path, { method: 'DELETE' });
+  del(path: string, options: CallOptions = {}): Promise<void> {
+    return request<void>(path, { method: 'DELETE', auth: options.auth });
   },
 };

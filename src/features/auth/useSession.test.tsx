@@ -1,7 +1,7 @@
-import { renderHook, waitFor, cleanup } from '@testing-library/react-native';
+import { renderHook, waitFor, cleanup, act } from '@testing-library/react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { useSession } from './useSession';
+import { useSession, useSignOut } from './useSession';
 import { api, ApiError } from '@/src/lib/api';
 import { tokenStorage } from '@/src/lib/tokenStorage';
 
@@ -40,9 +40,13 @@ jest.mock('@/src/lib/tokenStorage', () => ({
 const mockedApi = api as jest.Mocked<typeof api>;
 const mockedTokenStorage = tokenStorage as jest.Mocked<typeof tokenStorage>;
 
+// Captured by `wrapper` on each render so a test can spy on the exact
+// QueryClient instance the hook under test is using.
+let queryClient: QueryClient;
+
 function wrapper({ children }: { children: ReactNode }) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
 const profile = {
@@ -84,5 +88,44 @@ describe('useSession', () => {
     await waitFor(() => expect(result.current.deactivated).toBe(true));
     expect(result.current.session).toBeNull();
     expect(mockedTokenStorage.clear).toHaveBeenCalled();
+  });
+
+  it('drops the cached profile once deactivation clears the session', async () => {
+    // A valid session first, so react-query actually has a `['me']` entry
+    // with data cached — the bug this guards against is that stale `data`
+    // keeps being served after the session goes away.
+    mockedTokenStorage.getTokens.mockResolvedValue({ access: 'acc-1', refresh: 'ref-1' });
+    mockedApi.get.mockResolvedValueOnce(profile);
+    const { result } = await renderHook(() => useSession(), { wrapper });
+    await waitFor(() => expect(result.current.profile).not.toBeNull());
+
+    mockedApi.get.mockRejectedValue(new ApiError(403, 'deactivated'));
+    await act(async () => {
+      await result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.session).toBeNull());
+
+    expect(result.current.profile).toBeNull();
+    expect(result.current.deactivated).toBe(true);
+  });
+});
+
+describe('useSignOut', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedTokenStorage.clear.mockResolvedValue(undefined);
+  });
+
+  it('clears local tokens and the whole query cache', async () => {
+    mockedTokenStorage.getTokens.mockResolvedValue(null);
+    const { result } = await renderHook(() => useSignOut(), { wrapper });
+    const clearSpy = jest.spyOn(queryClient, 'clear');
+
+    await act(async () => {
+      await result.current();
+    });
+
+    expect(mockedTokenStorage.clear).toHaveBeenCalled();
+    expect(clearSpy).toHaveBeenCalled();
   });
 });
