@@ -16,7 +16,11 @@ export const t = {
     submit: 'Entra',
     forgot: 'Password dimenticata?',
     invalidCredentials: 'Email o password non corretti.',
+    tooManyAttempts: 'Troppi tentativi. Riprova tra 15 minuti.',
     deactivated: 'Il tuo account è stato disattivato. Contatta il titolare.',
+    invitationExpired: 'Questo invito è scaduto. Chiedine uno nuovo al titolare.',
+    emailTaken: 'Questa email ha già un account. Accedi invece di registrarti.',
+    invalidToken: 'Il link non è valido o è scaduto.',
     offline: 'Nessuna connessione. Riprova quando torni online.',
   },
   invite: {
@@ -40,6 +44,7 @@ export const t = {
     inStock: 'in magazzino',
     activeLots: 'lotti attivi',
     duplicateBarcode: (name: string) => `Questo codice è già associato a "${name}".`,
+    barcodeLocked: 'Il codice a barre non si può cambiare: il prodotto ha già dei lotti.',
   },
   errors: {
     generic: 'Qualcosa non ha funzionato. Riprova.',
