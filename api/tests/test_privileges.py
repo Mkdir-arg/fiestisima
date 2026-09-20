@@ -108,6 +108,32 @@ async def test_profiles_role_guard_trigger_only_fires_on_update(owner):
     assert [r[0] for r in rows] == ["UPDATE"]
 
 
+@pytest.mark.parametrize(
+    "table", ["users", "refresh_tokens", "login_attempts", "password_resets"]
+)
+async def test_app_user_has_no_privilege_on_owner_only_auth_tables(owner, table):
+    # These four tables carry credentials/tokens/attempt history and are
+    # never touched through app_user's RLS-scoped session: the API reads
+    # and writes them exclusively as owner (login, refresh/logout/password
+    # endpoints - see routers/auth.py's "# runs as owner:" comments), so
+    # app_user must have none of the four DML privileges on any of them.
+    cur = await owner.execute(
+        """
+        select
+          has_table_privilege('app_user', %(table)s, 'SELECT'),
+          has_table_privilege('app_user', %(table)s, 'INSERT'),
+          has_table_privilege('app_user', %(table)s, 'UPDATE'),
+          has_table_privilege('app_user', %(table)s, 'DELETE')
+        """,
+        {"table": f"public.{table}"},
+    )
+    select_priv, insert_priv, update_priv, delete_priv = await cur.fetchone()
+    assert select_priv is False
+    assert insert_priv is False
+    assert update_priv is False
+    assert delete_priv is False
+
+
 async def test_no_supabase_roles_remain(owner):
     cur = await owner.execute(
         "select rolname from pg_roles where rolname in ('anon', 'authenticated')"

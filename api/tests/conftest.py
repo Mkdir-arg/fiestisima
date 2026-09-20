@@ -1,8 +1,7 @@
 """Shared fixtures for the API test suite.
 
 Tests run against the real database configured in api/.env.test (Railway's
-fiestisima-db). There is no API yet (Task 3 brings routers and password
-hashing), so fixtures that need users/profiles insert directly as the
+fiestisima-db). Fixtures that need users/profiles insert directly as the
 database owner, exactly the way login/invitation-acceptance/migrations are
 the only three owner-mode call sites the design allows.
 """
@@ -13,6 +12,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from dotenv import load_dotenv
 
@@ -28,6 +28,16 @@ load_dotenv(API_DIR / ".env.test", override=True)
 # app.config.settings (built at import time) resolves DATABASE_URL to the
 # test database, not whatever api/.env would otherwise supply.
 from app.db import pool, as_owner  # noqa: E402
+from app.security import hash_password  # noqa: E402
+from app.main import app  # noqa: E402
+
+# Every test user in the `business` fixture shares this password, hashed
+# once at import time with the real argon2id hasher (not a fake string) so
+# test_auth.py can exercise actual login/verify against it. Hashing is slow
+# by design (argon2id); doing it once per test session instead of once per
+# fixture instance keeps the suite fast.
+TEST_PASSWORD = "Correct-Horse-Battery-Staple-1"
+TEST_PASSWORD_HASH = hash_password(TEST_PASSWORD)
 
 
 @pytest.fixture(scope="session")
@@ -43,6 +53,17 @@ async def _pool_lifecycle():
 
 
 @pytest.fixture
+async def client():
+    """An httpx client talking to the real FastAPI app in-process (ASGI
+    transport, no network/socket), sharing the same connection pool the
+    _pool_lifecycle fixture already opened - the app's own lifespan is not
+    triggered by ASGITransport, so the pool must already be open."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest.fixture
 async def owner():
     """A single owner-mode transaction (RLS does not apply): the fixture
     equivalent of the runner/login/invitation-acceptance call sites."""
@@ -50,11 +71,11 @@ async def owner():
         yield conn
 
 
-async def _insert_user_profile(conn, business_id, role: str, suffix: str) -> uuid.UUID:
+async def _insert_user_profile(conn, business_id, role: str, suffix: str) -> tuple[uuid.UUID, str]:
     email = f"test-{role}-{suffix}@fiestisima-tests.invalid"
     cur = await conn.execute(
         "insert into users (email, password_hash) values (%s, %s) returning id",
-        (email, "not-a-real-hash-task-3-brings-argon2"),
+        (email, TEST_PASSWORD_HASH),
     )
     row = await cur.fetchone()
     user_id = row[0]
@@ -62,7 +83,7 @@ async def _insert_user_profile(conn, business_id, role: str, suffix: str) -> uui
         "insert into profiles (id, business_id, full_name, role) values (%s, %s, %s, %s)",
         (user_id, business_id, f"Test {role} {suffix}", role),
     )
-    return user_id
+    return user_id, email
 
 
 @pytest.fixture
@@ -80,9 +101,11 @@ async def business():
         row = await cur.fetchone()
         business_id = row[0]
 
-        titolare_id = await _insert_user_profile(conn, business_id, "titolare", suffix)
-        responsabile_id = await _insert_user_profile(conn, business_id, "responsabile", suffix)
-        operatore_id = await _insert_user_profile(conn, business_id, "operatore", suffix)
+        titolare_id, titolare_email = await _insert_user_profile(conn, business_id, "titolare", suffix)
+        responsabile_id, responsabile_email = await _insert_user_profile(
+            conn, business_id, "responsabile", suffix
+        )
+        operatore_id, operatore_email = await _insert_user_profile(conn, business_id, "operatore", suffix)
 
     data = SimpleNamespace(
         business_id=business_id,
@@ -90,6 +113,12 @@ async def business():
         responsabile_id=responsabile_id,
         operatore_id=operatore_id,
         user_ids=[titolare_id, responsabile_id, operatore_id],
+        titolare_email=titolare_email,
+        responsabile_email=responsabile_email,
+        operatore_email=operatore_email,
+        # Every user above shares this plaintext password; TEST_PASSWORD_HASH
+        # is what got stored, this is what a login request sends.
+        password=TEST_PASSWORD,
     )
 
     yield data

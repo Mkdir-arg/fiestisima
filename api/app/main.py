@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db import pool, as_owner
+from .routers.auth import router as auth_router
 
 
 @asynccontextmanager
@@ -37,6 +38,9 @@ async def insufficient_privilege_handler(request: Request, exc: psycopg.errors.I
 @app.exception_handler(psycopg.errors.UniqueViolation)
 async def unique_violation_handler(request: Request, exc: psycopg.errors.UniqueViolation):
     return JSONResponse(status_code=409, content={"detail": "conflict"})
+
+
+app.include_router(auth_router)
 
 
 @app.get("/health")
