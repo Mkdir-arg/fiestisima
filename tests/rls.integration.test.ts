@@ -73,8 +73,10 @@ async function ownBusinessId(client: SupabaseClient): Promise<string> {
 let admin: SupabaseClient;
 let titolare: SupabaseClient;
 let operatore: SupabaseClient;
+let responsabile: SupabaseClient;
 let titolareId: string;
 let operatoreId: string;
+let responsabileId: string;
 let businessAId: string;
 let businessBId: string;
 let businessBOwnerId: string;
@@ -137,13 +139,16 @@ beforeAll(async () => {
 
   const titolareCreds = await createUser(businessAId, 'titolare');
   const operatoreCreds = await createUser(businessAId, 'operatore');
+  const responsabileCreds = await createUser(businessAId, 'responsabile');
   const businessBOwner = await createUser(businessBId, 'titolare');
   businessBOwnerId = businessBOwner.id;
 
   titolare = await signIn(titolareCreds.email, titolareCreds.password);
   operatore = await signIn(operatoreCreds.email, operatoreCreds.password);
+  responsabile = await signIn(responsabileCreds.email, responsabileCreds.password);
   titolareId = await currentUserId(titolare);
   operatoreId = await currentUserId(operatore);
+  responsabileId = await currentUserId(responsabile);
 
   // Baseline catalog for business A.
   const { data: supplier, error: supplierError } = await admin
@@ -218,14 +223,33 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Deleting the businesses cascades (on delete cascade on every
-  // business_id foreign key in 0001) through profiles, products, lots and
-  // movements in one statement, without tripping the created_by restrict:
-  // the referencing lots/movements rows are removed by the same cascade
-  // graph as the profiles they point to. Only the auth.users rows survive
-  // that and need their own cleanup.
+  // A single "delete from businesses" cannot cascade past
+  // lots.created_by/movements.created_by, both "on delete restrict"
+  // against profiles: RESTRICT is checked immediately and cannot be
+  // deferred, and the cascade from businesses to profiles fires before -
+  // not after - the cascades from businesses to lots and to movements, so
+  // the whole statement would abort with a foreign key violation while
+  // still-referenced lots/movements rows exist. Deleting in explicit
+  // dependency order - movements, then lots, then profiles, then
+  // businesses - avoids that entirely, and checking each step's error
+  // means a teardown regression fails this hook loudly instead of leaving
+  // two businesses, a full catalogue and three auth users behind on every
+  // run without a trace.
   if (createdBusinessIds.length > 0) {
-    await admin.from('businesses').delete().in('id', createdBusinessIds);
+    const movementsDel = await admin.from('movements').delete().in('business_id', createdBusinessIds);
+    if (movementsDel.error) throw new Error(`teardown: movements: ${movementsDel.error.message}`);
+
+    const lotsDel = await admin.from('lots').delete().in('business_id', createdBusinessIds);
+    if (lotsDel.error) throw new Error(`teardown: lots: ${lotsDel.error.message}`);
+
+    const profilesDel = await admin.from('profiles').delete().in('business_id', createdBusinessIds);
+    if (profilesDel.error) throw new Error(`teardown: profiles: ${profilesDel.error.message}`);
+
+    // Everything else business-scoped (suppliers, categories, products,
+    // events, invitations) has no restrict pointing at it once lots and
+    // movements are gone, so the businesses' own cascade handles the rest.
+    const businessesDel = await admin.from('businesses').delete().in('id', createdBusinessIds);
+    if (businessesDel.error) throw new Error(`teardown: businesses: ${businessesDel.error.message}`);
   }
   for (const id of createdUserIds) {
     await deleteUser(id);
@@ -265,10 +289,56 @@ describe('the price never leaves the database for an operatore', () => {
   });
 
   it('a titolare selecting from lots directly is denied outright too - reads go through the view for everyone', async () => {
+    // Note this is specifically about "*" (which pulls in unit_price and
+    // document_url, columns nobody has select on): lots_select does let a
+    // titolare/operatore select individual non-price columns straight off
+    // the table now (see "the permission matrix" below) - that policy has
+    // to exist for lots_update and insert-then-read-it-back to work at
+    // all, and it was never the mechanism protecting the price.
     const { data, error } = await titolare.from('lots').select('*');
     expect(error).not.toBeNull();
     expect(error?.code).toBe('42501');
     expect(data).toBeNull();
+  });
+});
+
+// ============================================================ column privileges on lots
+
+describe('created_by and business_id on lots cannot be rewritten after the fact', () => {
+  it('a titolare can correct lot_code but cannot reassign created_by or business_id', async () => {
+    const fixture = await admin
+      .from('lots')
+      .insert({
+        business_id: businessAId,
+        product_id: productAId,
+        lot_code: `COLPRIV-${randomUUID()}`,
+        created_by: titolareId,
+      })
+      .select('id')
+      .single();
+    expect(fixture.error).toBeNull();
+    const lotId = fixture.data!.id as string;
+
+    try {
+      const newCode = `COLPRIV-CORRECTED-${randomUUID()}`;
+      const lotCodeUpdate = await titolare.from('lots').update({ lot_code: newCode }).eq('id', lotId).select('lot_code').single();
+      expect(lotCodeUpdate.error).toBeNull();
+      expect(lotCodeUpdate.data?.lot_code).toBe(newCode);
+
+      // lots_insert pins created_by to the caller, but lots_update's own
+      // with check only re-tests business_id - column privileges are what
+      // actually stop an existing lot's audit trail from being rewritten,
+      // for every role, titolare included.
+      const createdByUpdate = await titolare.from('lots').update({ created_by: operatoreId }).eq('id', lotId);
+      expect(createdByUpdate.error).not.toBeNull();
+      expect(createdByUpdate.error?.code).toBe('42501');
+
+      const businessIdUpdate = await titolare.from('lots').update({ business_id: businessBId }).eq('id', lotId);
+      expect(businessIdUpdate.error).not.toBeNull();
+      expect(businessIdUpdate.error?.code).toBe('42501');
+    } finally {
+      await admin.from('lots').delete().eq('id', lotId);
+    }
   });
 });
 
@@ -285,6 +355,7 @@ describe('an operatore does not administer the catalog', () => {
     const businessId = await ownBusinessId(operatore);
     const { error } = await operatore.from('products').insert({ business_id: businessId, name: 'Contrabando' });
     expect(error).not.toBeNull();
+    expect(error?.code).toBe('42501'); // insufficient_privilege - products_write's with check rejects the role
   });
 
   it('cannot invite users', async () => {
@@ -296,20 +367,166 @@ describe('an operatore does not administer the catalog', () => {
       role: 'operatore',
     });
     expect(error).not.toBeNull();
+    expect(error?.code).toBe('42501'); // insufficient_privilege - invitations_all's with check rejects the role
+  });
+});
+
+// ============================================================ the permission matrix's untested corners
+
+describe('the permission matrix: rights the earlier rounds left untested', () => {
+  it('an operatore can insert a lot - goods-in is everyone\'s job on the floor', async () => {
+    const { data, error } = await operatore
+      .from('lots')
+      .insert({ business_id: businessAId, product_id: productAId, lot_code: `OP-LOT-${randomUUID()}`, created_by: operatoreId })
+      .select('id')
+      .single();
+    expect(error).toBeNull();
+    expect(data?.id).toBeDefined();
+    await admin.from('lots').delete().eq('id', data!.id);
+  });
+
+  it('an operatore can insert a movement - this is the central positive right of the whole app, and until now every insert in this file was made by titolare or admin', async () => {
+    const { data, error } = await operatore
+      .from('movements')
+      .insert({ business_id: businessAId, lot_id: pricedLotId, type: 'carico', quantity: 1, created_by: operatoreId })
+      .select('id')
+      .single();
+    expect(error).toBeNull();
+    expect(data?.id).toBeDefined();
+    await admin.from('movements').delete().eq('id', data!.id);
+  });
+
+  it('an operatore cannot update a lot', async () => {
+    const fixture = await admin
+      .from('lots')
+      .insert({ business_id: businessAId, product_id: productAId, lot_code: `OP-UPD-${randomUUID()}`, created_by: titolareId })
+      .select('id')
+      .single();
+    expect(fixture.error).toBeNull();
+    const lotId = fixture.data!.id as string;
+
+    try {
+      // Same shape as the movement-immutability tests above: lots_update's
+      // USING clause excludes the row for an operatore, so PostgREST
+      // reports success on zero matched rows rather than an error. The
+      // invariant is that the row does not change.
+      const updateResult = await operatore.from('lots').update({ lot_code: 'should-not-apply' }).eq('id', lotId);
+      expect(updateResult.error).toBeNull();
+
+      const { data } = await admin.from('lots').select('lot_code').eq('id', lotId).single();
+      expect(data?.lot_code).not.toBe('should-not-apply');
+    } finally {
+      await admin.from('lots').delete().eq('id', lotId);
+    }
+  });
+
+  it('a responsabile can update a lot', async () => {
+    const fixture = await admin
+      .from('lots')
+      .insert({ business_id: businessAId, product_id: productAId, lot_code: `RESP-UPD-${randomUUID()}`, created_by: titolareId })
+      .select('id')
+      .single();
+    expect(fixture.error).toBeNull();
+    const lotId = fixture.data!.id as string;
+
+    try {
+      const newCode = `RESP-UPD-DONE-${randomUUID()}`;
+      const { data, error } = await responsabile
+        .from('lots')
+        .update({ lot_code: newCode })
+        .eq('id', lotId)
+        .select('lot_code')
+        .single();
+      expect(error).toBeNull();
+      expect(data?.lot_code).toBe(newCode);
+    } finally {
+      await admin.from('lots').delete().eq('id', lotId);
+    }
+  });
+
+  describe('businesses_update is restricted to titolare', () => {
+    it('a titolare can update their own business', async () => {
+      const { data: before } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      const newName = `RLS test business A ${randomUUID()}`;
+      const { data, error } = await titolare
+        .from('businesses')
+        .update({ name: newName })
+        .eq('id', businessAId)
+        .select('name')
+        .single();
+      expect(error).toBeNull();
+      expect(data?.name).toBe(newName);
+      // Restore, so the business's name doesn't churn pointlessly on every run.
+      await admin.from('businesses').update({ name: before!.name }).eq('id', businessAId);
+    });
+
+    it('a responsabile cannot update the business', async () => {
+      const { data: before } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      const updateResult = await responsabile.from('businesses').update({ name: 'should-not-apply' }).eq('id', businessAId);
+      expect(updateResult.error).toBeNull(); // same silent-zero-rows shape as the write-denial cases above
+      const { data: after } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      expect(after?.name).toBe(before?.name);
+    });
+
+    it('an operatore cannot update the business', async () => {
+      const { data: before } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      const updateResult = await operatore.from('businesses').update({ name: 'should-not-apply' }).eq('id', businessAId);
+      expect(updateResult.error).toBeNull();
+      const { data: after } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      expect(after?.name).toBe(before?.name);
+    });
   });
 });
 
 // ============================================================ immutable traceability
 
 describe('the movement record is immutable', () => {
-  it('nobody can delete a movement', async () => {
-    const { error } = await titolare.from('movements').delete().neq('id', randomUUID());
-    expect(error).not.toBeNull();
+  let immutableMovementId: string;
+  let immutableMovementQuantity: number;
+
+  beforeAll(async () => {
+    const { data, error } = await titolare
+      .from('movements')
+      .insert({ business_id: businessAId, lot_id: pricedLotId, type: 'carico', quantity: 7, created_by: titolareId })
+      .select('id, quantity')
+      .single();
+    if (error || !data) throw new Error(`fixture: immutable movement: ${error?.message}`);
+    immutableMovementId = data.id as string;
+    immutableMovementQuantity = data.quantity as number;
   });
 
-  it('nobody can modify a movement', async () => {
-    const { error } = await titolare.from('movements').update({ quantity: 1 }).neq('id', randomUUID());
-    expect(error).not.toBeNull();
+  afterAll(async () => {
+    await admin.from('movements').delete().eq('id', immutableMovementId);
+  });
+
+  // With RLS on and no update/delete policy on movements, the USING filter
+  // excludes the row silently - authenticated still holds the table-level
+  // UPDATE/DELETE privilege (nothing here revokes it), so there is no
+  // 42501 either. PostgREST reports that as a plain success (204, error
+  // null), because as far as it can tell zero rows matched the request.
+  // Asserting `error).not.toBeNull()` here would fail against a *correct*
+  // implementation and, per "if a test fails, fix the policy, not the
+  // test", would be an open invitation to loosen movements - the one table
+  // the whole legal record depends on. The actual invariant is that the
+  // row is unchanged, which only a follow-up read (via admin, since the
+  // point is to check the real column value regardless of what the
+  // titolare client is allowed to see) can confirm.
+  it('an update from titolare reports success but does not change the row', async () => {
+    const updateResult = await titolare.from('movements').update({ quantity: 999 }).eq('id', immutableMovementId);
+    expect(updateResult.error).toBeNull();
+
+    const { data, error } = await admin.from('movements').select('quantity').eq('id', immutableMovementId).single();
+    expect(error).toBeNull();
+    expect(data?.quantity).toBe(immutableMovementQuantity);
+  });
+
+  it('a delete from titolare reports success but does not remove the row', async () => {
+    const deleteResult = await titolare.from('movements').delete().eq('id', immutableMovementId);
+    expect(deleteResult.error).toBeNull();
+
+    const { data, error } = await admin.from('movements').select('id').eq('id', immutableMovementId).single();
+    expect(error).toBeNull();
+    expect(data?.id).toBe(immutableMovementId);
   });
 });
 
@@ -561,6 +778,11 @@ describe('profiles_block_self_role_change_trg gates role/active changes by the c
     try {
       const { error } = await client.from('profiles').update({ role: 'titolare' }).eq('id', throwaway.id);
       expect(error).not.toBeNull();
+      // The trigger raises with an explicit errcode so this is
+      // distinguishable from a generic PL/pgSQL exception (P0001) or from
+      // an RLS policy violation, both of which are also plausible-sounding
+      // failures on this same call.
+      expect(error?.code).toBe('42501');
 
       const { data: afterAttempt } = await admin.from('profiles').select('role').eq('id', throwaway.id).single();
       expect(afterAttempt?.role).toBe('operatore');
