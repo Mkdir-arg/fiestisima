@@ -1,7 +1,6 @@
 -- Fiestisima - initial schema
 -- Multi-tenant from day one. Every business table carries business_id.
 
-create extension if not exists pgcrypto;
 create extension if not exists citext;
 
 -- ---------------------------------------------------------------- types
@@ -29,7 +28,8 @@ create table profiles (
   role user_role not null default 'operatore',
   active boolean not null default true,
   last_seen_at timestamptz,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  unique (id, business_id)
 );
 create index profiles_business_idx on profiles (business_id);
 
@@ -40,10 +40,18 @@ create table invitations (
   full_name text not null,
   role user_role not null default 'operatore',
   token uuid not null default gen_random_uuid(),
-  invited_by uuid references profiles (id) on delete set null,
+  invited_by uuid,
   expires_at timestamptz not null default now() + interval '7 days',
   accepted_at timestamptz,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  -- The database refuses to mix tenants rather than trusting every query to
+  -- be written correctly: every intra-tenant reference below is a composite
+  -- foreign key paired with business_id against a unique (id, business_id)
+  -- on the parent, so a row can only point at a parent row from the same
+  -- business. Composite foreign keys default to MATCH SIMPLE, which skips
+  -- the check when the referencing column is null - exactly what is wanted
+  -- for these optional references.
+  foreign key (invited_by, business_id) references profiles (id, business_id) on delete set null
 );
 -- Only one pending invitation per email and business.
 create unique index invitations_pending_idx
@@ -61,14 +69,16 @@ create table suppliers (
   notes text,
   active boolean not null default true,
   created_at timestamptz not null default now(),
-  unique (business_id, name)
+  unique (business_id, name),
+  unique (id, business_id)
 );
 
 create table categories (
   id uuid primary key default gen_random_uuid(),
   business_id uuid not null references businesses (id) on delete cascade,
   name text not null,
-  unique (business_id, name)
+  unique (business_id, name),
+  unique (id, business_id)
 );
 
 create table products (
@@ -78,7 +88,7 @@ create table products (
   barcode text,
   is_internal_code boolean not null default false,
   brand text,
-  category_id uuid references categories (id) on delete set null,
+  category_id uuid,
   unit unit_kind not null default 'pz',
   storage storage_place not null default 'dispensa',
   min_stock numeric not null default 0 check (min_stock >= 0),
@@ -87,11 +97,14 @@ create table products (
   active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  updated_by uuid references profiles (id) on delete set null,
+  updated_by uuid,
   -- The code is unique per business, not globally: two businesses can share
   -- the same EAN. Several products with no code coexist because NULL never
   -- collides.
-  unique (business_id, barcode)
+  unique (business_id, barcode),
+  unique (id, business_id),
+  foreign key (category_id, business_id) references categories (id, business_id) on delete set null,
+  foreign key (updated_by, business_id) references profiles (id, business_id) on delete set null
 );
 create index products_business_active_idx on products (business_id, active);
 
@@ -105,26 +118,31 @@ create table events (
   status text not null default 'previsto' check (status in ('previsto', 'concluso')),
   client_name text,
   notes text,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  unique (id, business_id)
 );
 create index events_business_date_idx on events (business_id, event_date);
 
 create table lots (
   id uuid primary key default gen_random_uuid(),
   business_id uuid not null references businesses (id) on delete cascade,
-  product_id uuid not null references products (id) on delete restrict,
-  supplier_id uuid references suppliers (id) on delete restrict,
+  product_id uuid not null,
+  supplier_id uuid,
   lot_code text not null,
   expires_on date,
   unit_price numeric check (unit_price >= 0),
   document_url text,
   received_on date not null default current_date,
-  created_by uuid references profiles (id) on delete set null,
+  created_by uuid,
   created_at timestamptz not null default now(),
   -- Two identical goods-in entries do not create two lots. NULLS NOT
   -- DISTINCT makes a lot with no date or no supplier collide with itself
   -- too.
-  unique nulls not distinct (business_id, product_id, lot_code, expires_on, supplier_id)
+  unique nulls not distinct (business_id, product_id, lot_code, expires_on, supplier_id),
+  unique (id, business_id),
+  foreign key (product_id, business_id) references products (id, business_id) on delete restrict,
+  foreign key (supplier_id, business_id) references suppliers (id, business_id) on delete restrict,
+  foreign key (created_by, business_id) references profiles (id, business_id) on delete set null
 );
 create index lots_product_idx on lots (product_id);
 create index lots_expiry_idx on lots (business_id, expires_on);
@@ -132,18 +150,23 @@ create index lots_expiry_idx on lots (business_id, expires_on);
 create table movements (
   id uuid primary key default gen_random_uuid(),
   business_id uuid not null references businesses (id) on delete cascade,
-  lot_id uuid not null references lots (id) on delete restrict,
-  event_id uuid references events (id) on delete set null,
+  lot_id uuid not null,
+  event_id uuid,
   type movement_type not null,
   quantity numeric not null check (quantity > 0),
   reason text,
-  reverses_id uuid references movements (id) on delete set null,
+  reverses_id uuid,
   -- Idempotency for the offline queue: a retry does not duplicate the
   -- movement.
   client_id uuid unique,
-  created_by uuid references profiles (id) on delete set null,
+  created_by uuid,
   created_at timestamptz not null default now(),
-  constraint scarto_needs_reason check (type <> 'scarto' or reason is not null)
+  constraint scarto_needs_reason check (type <> 'scarto' or reason is not null),
+  unique (id, business_id),
+  foreign key (lot_id, business_id) references lots (id, business_id) on delete restrict,
+  foreign key (event_id, business_id) references events (id, business_id) on delete set null,
+  foreign key (reverses_id, business_id) references movements (id, business_id) on delete set null,
+  foreign key (created_by, business_id) references profiles (id, business_id) on delete set null
 );
 create index movements_lot_idx on movements (lot_id);
 create index movements_business_date_idx on movements (business_id, created_at desc);
