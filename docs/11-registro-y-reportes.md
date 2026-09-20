@@ -3,7 +3,7 @@
 ## Registro de trazabilidad
 Es la vista de todos los movimientos, la que se muestra a un inspector.
 
-**Columnas**: fecha y hora · producto · lote · scadenza · fornitore · tipo (Carico / Uso / Vendita / Scarto) · cantidad · usuario · documento adjunto (icono si hay foto de DDT).
+**Columnas**: fecha y hora · producto · lote · scadenza · fornitore · tipo (Carico / Uso / Vendita / Scarto) · evento (si el movimiento se imputó a uno) · cantidad · usuario · documento adjunto (icono si hay foto de DDT).
 
 **Filtros**: rango de fechas (presets: oggi, settimana, mese, anno) · producto · lote · fornitore · tipo · usuario.
 

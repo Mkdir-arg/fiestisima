@@ -2,6 +2,8 @@
 
 Es la funcionalidad central. Todo lo demás existe para que esto sea rápido.
 
+**Nota de entrega**: el modo `Etichetta (OCR)` usa ML Kit, que necesita un build nativo — Expo Go no lo incluye — y un build nativo necesita una cuenta de Apple Developer, que hoy no existe (ver doc 14). El OCR **no entra en la primera entrega**, que es web. Este documento describe la funcionalidad completa tal como quedó diseñada, para el día en que exista la cuenta; el modo `Codice a barre`, en cambio, sí funciona en web (ver "Web" más abajo).
+
 ## Pantalla `Scansiona`
 Pantalla completa con la cámara. Tres modos en un selector superior:
 1. `Codice a barre` (por defecto)
@@ -51,9 +53,9 @@ Controles: cerrar, linterna, y en la parte inferior una hoja (bottom sheet) que 
 Foto del documento de transporte → se detectan las líneas (descripción, cantidad, a veces lote) y se propone un carico múltiple para revisar. En el MVP solo se **adjunta la foto** al lote como evidencia (doc 07).
 
 ## Web
-En web no hay cámara nativa. Se soporta lector USB: el campo de búsqueda recibe el código como texto + Enter y dispara el mismo flujo.
+El código de barras sí se lee en web: una librería JS de cámara hace el mismo trabajo que `expo-camera` en el teléfono, sin build nativo. Además se soporta lector USB: el campo de búsqueda recibe el código como texto + Enter y dispara el mismo flujo. Lo único que la web no puede hacer es el OCR de lote y fecha (modo 2): depende de ML Kit y de un build nativo — ver la nota de entrega arriba.
 
 ## Criterios de aceptación
 - Escanear un EAN conocido y llegar a `Registra carico` con el producto cargado: menos de 3 segundos.
-- OCR de una etiqueta impresa nítida: lote y fecha correctos en al menos 8 de 10 intentos con buena luz.
+- OCR de una etiqueta impresa nítida, cuando exista build nativo (ver nota de entrega): lote y fecha correctos en al menos 8 de 10 intentos con buena luz.
 - Ningún valor OCR entra a la base sin confirmación explícita.
