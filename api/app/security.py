@@ -15,6 +15,7 @@ from uuid import UUID
 import jwt
 from fastapi import Header, HTTPException
 from pwdlib import PasswordHash
+from pwdlib.exceptions import UnknownHashError
 
 from .config import settings
 
@@ -26,7 +27,14 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    return _password_hasher.verify(password, password_hash)
+    # UnknownHashError fires on any hash pwdlib's configured hashers do not
+    # recognise - a corrupt or foreign-format row, not the caller's fault.
+    # Without this, that one bad row would 500 instead of just failing the
+    # login it belongs to, same as a wrong password would.
+    try:
+        return _password_hasher.verify(password, password_hash)
+    except UnknownHashError:
+        return False
 
 
 def sha256_hex(raw: str) -> str:
@@ -96,16 +104,19 @@ async def issue_refresh_token(conn, user_id: UUID) -> str:
     return raw
 
 
-async def resolve_refresh_token(conn, raw: str) -> tuple[UUID, UUID]:
-    """Looks a refresh token up by hash and validates it, without mutating
-    anything. Split out from rotate_refresh_token so a caller that also
-    needs to check something else about the user (routers/auth.py's
-    /refresh checks profiles.active) can do that check before deciding
-    whether to rotate at all - rotating first and then having to undo it
-    would not work, since undoing means raising inside the same
-    transaction that did the rotation, which rolls the rotation back too
-    (see the "own transaction" comments on _record_attempt and
-    revoke_all_refresh_tokens' call sites in routers/auth.py)."""
+async def rotate_refresh_token(conn, raw: str) -> tuple[UUID, str]:
+    """Resolves a refresh token, revokes it, and issues its successor - the
+    single code path /auth/refresh uses.
+
+    The revoke is the concurrency gate, not the SELECT below: two
+    concurrent calls with the same raw token could both read revoked_at IS
+    NULL from the SELECT before either one writes, and without a guard on
+    the UPDATE both would go on to mint a successor for the same
+    predecessor token. Folding "and revoked_at is null" into the UPDATE's
+    own WHERE clause makes the database, not this function's control flow,
+    decide which of two racing callers gets to revoke the row; the loser's
+    rowcount is 0 and it fails the same way a replayed token would.
+    """
     token_hash = sha256_hex(raw)
     cur = await conn.execute(
         "select id, user_id, expires_at, revoked_at from refresh_tokens where token_hash = %s",
@@ -119,16 +130,16 @@ async def resolve_refresh_token(conn, raw: str) -> tuple[UUID, UUID]:
         raise RefreshTokenError("revoked")
     if expires_at < datetime.now(timezone.utc):
         raise RefreshTokenError("expired")
-    return token_id, user_id
 
-
-async def rotate_refresh_token(conn, raw: str) -> tuple[UUID, str]:
-    """Resolves, revokes, and reissues in one step - all inside the
-    caller's transaction, so a failure here leaves nothing rotated."""
-    token_id, user_id = await resolve_refresh_token(conn, raw)
-    await conn.execute(
-        "update refresh_tokens set revoked_at = now() where id = %s", (token_id,)
+    cur = await conn.execute(
+        "update refresh_tokens set revoked_at = now() where id = %s and revoked_at is null",
+        (token_id,),
     )
+    if cur.rowcount != 1:
+        # Lost the race: another concurrent rotation of this exact token
+        # got there first, between the SELECT above and this UPDATE.
+        raise RefreshTokenError("revoked")
+
     new_raw = await issue_refresh_token(conn, user_id)
     return user_id, new_raw
 

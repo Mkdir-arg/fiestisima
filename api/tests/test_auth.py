@@ -3,6 +3,8 @@
 Exercised end to end through httpx against the real FastAPI app (ASGI
 transport) and the real database - no mocking of psycopg or JWT.
 """
+import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -67,6 +69,27 @@ async def test_five_failed_attempts_lock_out_the_sixth_even_with_right_password(
     assert resp.json()["detail"] == "too_many_attempts"
 
 
+async def test_concurrent_wrong_password_burst_does_not_stall_the_pool(client, business):
+    # Regression guard for the nested-pool-checkout bug: a wrong-password
+    # login used to record the failed attempt through a *second* pool
+    # connection opened while the first (the request's own as_owner()
+    # connection) was still open. With enough concurrent failures that
+    # exhausts the pool (db.py's max_size=10) and every request stalls for
+    # the full 30s checkout timeout before failing - or 500s outright. All
+    # twelve here share one connection each, so they should come back
+    # quickly with an ordinary 401 or 423, never a timeout or a 500.
+    email = business.responsabile_email
+    start = time.monotonic()
+    responses = await asyncio.gather(
+        *(_login(client, email, "wrong-password") for _ in range(12))
+    )
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 10, f"took {elapsed:.1f}s - looks like a pool stall"
+    for resp in responses:
+        assert resp.status_code in (401, 423), resp.status_code
+
+
 async def test_refresh_rotates_and_old_token_then_fails(client, business):
     login_resp = await _login(client, business.titolare_email, business.password)
     old_refresh = login_resp.json()["refresh_token"]
@@ -81,6 +104,26 @@ async def test_refresh_rotates_and_old_token_then_fails(client, business):
     replay_resp = await client.post("/auth/refresh", json={"refresh_token": old_refresh})
     assert replay_resp.status_code == 401
     assert replay_resp.json()["detail"] == "invalid_token"
+
+
+async def test_concurrent_refresh_of_same_token_only_one_succeeds(client, business):
+    # Regression guard for the check-then-write race in rotate_refresh_token:
+    # two requests racing to rotate the same token must not both mint a
+    # successor for the same predecessor - the database's own atomic
+    # "update ... where revoked_at is null" gate should let exactly one
+    # through and fail the other, whichever order they actually interleave
+    # in.
+    login_resp = await _login(client, business.operatore_email, business.password)
+    refresh_token = login_resp.json()["refresh_token"]
+
+    responses = await asyncio.gather(
+        client.post("/auth/refresh", json={"refresh_token": refresh_token}),
+        client.post("/auth/refresh", json={"refresh_token": refresh_token}),
+    )
+    statuses = sorted(r.status_code for r in responses)
+    assert statuses == [200, 401]
+    loser = next(r for r in responses if r.status_code == 401)
+    assert loser.json()["detail"] == "invalid_token"
 
 
 async def test_refresh_rejects_a_user_deactivated_after_login(client, business):
@@ -157,7 +200,19 @@ async def test_me_with_expired_access_token_is_401(client, business):
 async def test_me_with_tampered_token_is_401(client, business):
     login_resp = await _login(client, business.titolare_email, business.password)
     access_token = login_resp.json()["access_token"]
-    tampered = access_token[:-1] + ("A" if access_token[-1] != "A" else "B")
+    header, payload, signature = access_token.split(".")
+
+    # Flip a character in the middle of the payload, not the last character
+    # of the signature. Base64url packs 6 bits per character; when a
+    # segment's decoded byte length isn't a multiple of 3, its last
+    # character carries unused padding bits that do not affect the decoded
+    # bytes at all, so substituting it decodes to the *same* bytes roughly
+    # 1 time in 16 (~6%) - a coin flip that made this exact test flaky
+    # before. A character in the payload's interior has no such slack.
+    mid = len(payload) // 2
+    flipped = "A" if payload[mid] != "A" else "B"
+    tampered_payload = payload[:mid] + flipped + payload[mid + 1 :]
+    tampered = f"{header}.{tampered_payload}.{signature}"
 
     resp = await client.get("/auth/me", headers={"Authorization": f"Bearer {tampered}"})
     assert resp.status_code == 401
@@ -205,6 +260,37 @@ async def test_reset_password_with_valid_token_allows_login_with_new_password(
 
     new_login = await _login(client, business.operatore_email, new_password)
     assert new_login.status_code == 200
+
+
+async def test_reset_password_second_use_of_same_token_is_401_and_password_unchanged(
+    client, business, caplog
+):
+    raw_token = await _forgot_and_capture_token(client, caplog, business.operatore_email)
+
+    first_new_password = "First-New-Password-5"
+    first = await client.post(
+        "/auth/password/reset", json={"token": raw_token, "password": first_new_password}
+    )
+    assert first.status_code == 200
+
+    second = await client.post(
+        "/auth/password/reset",
+        json={"token": raw_token, "password": "Second-New-Password-6"},
+    )
+    assert second.status_code == 401
+    assert second.json()["detail"] == "invalid_token"
+
+    # The first reset's password is still the one in effect; the rejected
+    # second reset did not overwrite it again.
+    still_the_first_password = await _login(
+        client, business.operatore_email, first_new_password
+    )
+    assert still_the_first_password.status_code == 200
+
+    not_the_second_password = await _login(
+        client, business.operatore_email, "Second-New-Password-6"
+    )
+    assert not_the_second_password.status_code == 401
 
 
 async def test_reset_password_revokes_existing_refresh_tokens(client, business, caplog):

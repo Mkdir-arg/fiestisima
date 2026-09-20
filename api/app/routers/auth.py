@@ -9,13 +9,28 @@ every as_owner() use say why at the call site:
 
 GET /auth/me is the only endpoint here that runs as_user: it reads nothing
 an operatore should not see about their own profile and business.
+
+Never open a second pool connection inside an as_owner()/as_user() block.
+The pool is small (db.py's max_size=10) and every request already holds
+one connection for the duration of its transaction; a handler that opens a
+second one while the first is still open (as an earlier version of this
+file did, for "record this attempt/revocation in a transaction that
+survives the error I'm about to raise") can deadlock the pool under
+concurrency - N concurrent requests each hold connection 1 and block on
+checking out connection 2, all waiting on each other, until every one of
+them times out. The fix used throughout this file instead: never raise
+inside the as_owner()/as_user() block. Do every write for both the success
+and failure paths on the one `conn` the block already holds, record which
+HTTPException (if any) applies in a plain local variable, let the block
+exit normally (which commits), and only then raise or return based on
+that variable.
 """
 import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..config import settings
 from ..db import as_owner, as_user
@@ -27,8 +42,8 @@ from ..security import (
     hash_password,
     issue_refresh_token,
     require_user,
-    resolve_refresh_token,
     revoke_all_refresh_tokens,
+    rotate_refresh_token,
     sha256_hex,
     verify_password,
 )
@@ -37,13 +52,34 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 LOCKOUT_THRESHOLD = 5
 RESET_TOKEN_TTL = timedelta(hours=1)
+# RFC 5321's own limit on a mailbox address, used as a plain sanity bound
+# on the request body - not full email validation (kept out to avoid an
+# extra dependency; an invalid-but-short string just fails the lookup).
+EMAIL_MAX_LENGTH = 254
+# Matches the client's invite screen rule (docs/04): 8 characters minimum
+# for a password a person chooses. Login has no minimum - a password
+# hashed before this rule existed can be shorter, and login must keep
+# accepting it.
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 1024
+
+# A fixed, valid argon2id hash of a random string nobody will ever type,
+# computed once at import time. login() runs verify_password against this
+# whenever the submitted email does not exist, so a real password check
+# (argon2id's own, deliberately slow, work factor) always happens on the
+# request's critical path - a request for an unknown email should take
+# indistinguishably long from one for a real email with a wrong password,
+# or timing alone would reveal which addresses are registered.
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 # --------------------------------------------------------------- schemas
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(max_length=EMAIL_MAX_LENGTH)
+    # No min_length: a password hashed before the 8-character rule existed
+    # must still be able to log in.
+    password: str = Field(max_length=PASSWORD_MAX_LENGTH)
 
 
 class RefreshRequest(BaseModel):
@@ -51,12 +87,12 @@ class RefreshRequest(BaseModel):
 
 
 class ForgotPasswordRequest(BaseModel):
-    email: str
+    email: str = Field(max_length=EMAIL_MAX_LENGTH)
 
 
 class ResetPasswordRequest(BaseModel):
     token: str
-    password: str
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
 
 
 class BusinessOut(BaseModel):
@@ -116,18 +152,11 @@ async def _load_profile(conn, user_id: UUID) -> ProfileOut | None:
     )
 
 
-async def _record_attempt(email: str, succeeded: bool) -> None:
-    """Deliberately its own owner-mode transaction, not the caller's: the
-    caller usually inserts a failure and then raises an HTTPException in
-    the same breath, and raising inside the *same* as_owner() transaction
-    would roll the insert back along with everything else - the whole
-    point of recording a failed attempt is that it survives the 401/403
-    that follows it."""
-    async with as_owner() as conn:
-        await conn.execute(
-            "insert into login_attempts (email, succeeded) values (%s, %s)",
-            (email, succeeded),
-        )
+async def _record_attempt(conn, email: str, succeeded: bool) -> None:
+    await conn.execute(
+        "insert into login_attempts (email, succeeded) values (%s, %s)",
+        (email, succeeded),
+    )
 
 
 # -------------------------------------------------------------------- login
@@ -135,6 +164,9 @@ async def _record_attempt(email: str, succeeded: bool) -> None:
 @router.post("/login", response_model=TokenPair)
 async def login(body: LoginRequest):
     # runs as owner: needs users.password_hash, which app_user cannot see.
+    error: HTTPException | None = None
+    result: TokenPair | None = None
+
     async with as_owner() as conn:
         # Deliberately not self-extending: a request rejected here (423)
         # is never itself inserted into login_attempts, so the lockout
@@ -153,40 +185,49 @@ async def login(body: LoginRequest):
         )
         (failed_count,) = await cur.fetchone()
         if failed_count >= LOCKOUT_THRESHOLD:
-            raise HTTPException(status_code=423, detail="too_many_attempts")
+            error = HTTPException(status_code=423, detail="too_many_attempts")
+        else:
+            cur = await conn.execute(
+                "select id, password_hash from users where email = %s", (body.email,)
+            )
+            row = await cur.fetchone()
 
-        cur = await conn.execute(
-            "select id, password_hash from users where email = %s", (body.email,)
-        )
-        row = await cur.fetchone()
+            # Unknown email and wrong password both fall through to the
+            # same 401 below - never reveal which one it was. verify_password
+            # always runs, against a real (if unrelated) argon2id hash even
+            # when the email does not exist, so a missing row costs the same
+            # wall-clock time as a wrong password on a real one.
+            if row is not None:
+                user_id, password_hash_value = row
+            else:
+                user_id, password_hash_value = None, _DUMMY_PASSWORD_HASH
+            password_ok = verify_password(body.password, password_hash_value) and user_id is not None
 
-        # Unknown email and wrong password both fall through to the same
-        # 401 below - never reveal which one it was.
-        user_id = None
-        password_ok = False
-        if row is not None:
-            user_id, password_hash_value = row
-            password_ok = verify_password(body.password, password_hash_value)
+            if not password_ok:
+                await _record_attempt(conn, body.email, succeeded=False)
+                error = HTTPException(status_code=401, detail="invalid_credentials")
+            else:
+                profile = await _load_profile(conn, user_id)
+                if profile is None or not profile.active:
+                    # Correct password but a deactivated (or profile-less)
+                    # account still counts as a failed attempt.
+                    await _record_attempt(conn, body.email, succeeded=False)
+                    error = HTTPException(status_code=403, detail="deactivated")
+                else:
+                    await _record_attempt(conn, body.email, succeeded=True)
+                    access_token = create_access_token(
+                        profile.id, profile.business_id, profile.role
+                    )
+                    refresh_token = await issue_refresh_token(conn, profile.id)
+                    result = TokenPair(
+                        access_token=access_token,
+                        refresh_token=refresh_token,
+                        profile=profile,
+                    )
 
-        if not password_ok:
-            await _record_attempt(body.email, succeeded=False)
-            raise HTTPException(status_code=401, detail="invalid_credentials")
-
-        profile = await _load_profile(conn, user_id)
-        if profile is None or not profile.active:
-            # Correct password but a deactivated (or profile-less) account
-            # still counts as a failed attempt.
-            await _record_attempt(body.email, succeeded=False)
-            raise HTTPException(status_code=403, detail="deactivated")
-
-        await _record_attempt(body.email, succeeded=True)
-
-        access_token = create_access_token(profile.id, profile.business_id, profile.role)
-        refresh_token = await issue_refresh_token(conn, profile.id)
-
-        return TokenPair(
-            access_token=access_token, refresh_token=refresh_token, profile=profile
-        )
+    if error is not None:
+        raise error
+    return result
 
 
 # ------------------------------------------------------------------ refresh
@@ -195,41 +236,41 @@ async def login(body: LoginRequest):
 async def refresh(body: RefreshRequest):
     # runs as owner: reads/writes refresh_tokens, an owner-only table with
     # no RLS and no grants to app_user.
+    error: HTTPException | None = None
+    result: RefreshResponse | None = None
+
     async with as_owner() as conn:
         try:
-            token_id, user_id = await resolve_refresh_token(conn, body.refresh_token)
+            user_id, new_raw = await rotate_refresh_token(conn, body.refresh_token)
         except RefreshTokenError:
-            raise HTTPException(status_code=401, detail="invalid_token")
+            error = HTTPException(status_code=401, detail="invalid_token")
+        else:
+            cur = await conn.execute(
+                "select business_id, role, active from profiles where id = %s", (user_id,)
+            )
+            row = await cur.fetchone()
+            if row is None:
+                error = HTTPException(status_code=401, detail="invalid_token")
+            else:
+                business_id, role, active = row
+                if not active:
+                    # The profile was deactivated some time after this
+                    # refresh token was issued (up to refresh_token_days
+                    # ago, including the brand-new one rotate_refresh_token
+                    # just minted above). Close the session now instead of
+                    # handing back an access token: revoke every refresh
+                    # token this user holds, on the same `conn` - it
+                    # commits with everything else once this block exits,
+                    # since the 403 below is raised only after that.
+                    await revoke_all_refresh_tokens(conn, user_id)
+                    error = HTTPException(status_code=403, detail="deactivated")
+                else:
+                    access_token = create_access_token(user_id, business_id, role)
+                    result = RefreshResponse(access_token=access_token, refresh_token=new_raw)
 
-        cur = await conn.execute(
-            "select business_id, role, active from profiles where id = %s", (user_id,)
-        )
-        row = await cur.fetchone()
-        if row is None:
-            raise HTTPException(status_code=401, detail="invalid_token")
-        business_id, role, active = row
-
-        if not active:
-            # The profile was deactivated some time after this refresh
-            # token was issued (up to refresh_token_days ago). Close the
-            # session now instead of handing out another access token:
-            # revoke every refresh token this user holds - in a
-            # transaction of its own, because raising the 403 right after
-            # would otherwise roll back a revoke made through `conn`
-            # along with everything else this as_owner() block did.
-            async with as_owner() as revoke_conn:
-                await revoke_all_refresh_tokens(revoke_conn, user_id)
-            raise HTTPException(status_code=403, detail="deactivated")
-
-        # Only mutate once the account is confirmed active: resolving the
-        # token above did not revoke or reissue anything yet.
-        await conn.execute(
-            "update refresh_tokens set revoked_at = now() where id = %s", (token_id,)
-        )
-        new_raw = await issue_refresh_token(conn, user_id)
-
-        access_token = create_access_token(user_id, business_id, role)
-        return RefreshResponse(access_token=access_token, refresh_token=new_raw)
+    if error is not None:
+        raise error
+    return result
 
 
 # ------------------------------------------------------------------- logout
@@ -255,11 +296,16 @@ async def me(current_user: CurrentUser = Depends(require_user)):
     async with as_user(current_user.id) as conn:
         profile = await _load_profile(conn, current_user.id)
         if profile is None:
-            # A valid, well-signed token for a profile that no longer
-            # exists (or was deactivated - RLS still returns it here since
-            # profiles_select does not filter on active, only /me's own
-            # code would need to for that) is treated the same as any
-            # other unusable credential.
+            # Covers a profile that no longer exists, and also a
+            # deactivated one: app_business_id() (used by profiles_select's
+            # own "business_id = app_business_id()" policy) only resolves a
+            # business for an *active* profile, so once deactivated, RLS
+            # hides this row even from its own owner, not just from
+            # colleagues. A valid, well-signed token for either case is
+            # treated the same as any other unusable credential - 401, not
+            # 403, here. The client's refresh retry is what actually
+            # surfaces 403 deactivated (see /auth/refresh), which is the
+            # flow Task 6 implements.
             raise HTTPException(status_code=401, detail="invalid_token")
         return profile
 
@@ -275,6 +321,15 @@ async def forgot_password(body: ForgotPasswordRequest):
         row = await cur.fetchone()
         if row is not None:
             user_id = row[0]
+            # At most one live reset token per user: an earlier request
+            # that was never used (a second "forgot my password" click, or
+            # an abandoned one) should not stay valid once a fresh token is
+            # issued.
+            await conn.execute(
+                "update password_resets set used_at = now() "
+                "where user_id = %s and used_at is null",
+                (user_id,),
+            )
             raw_token = secrets.token_urlsafe(32)
             token_hash = sha256_hex(raw_token)
             expires_at = datetime.now(timezone.utc) + RESET_TOKEN_TTL
@@ -298,38 +353,50 @@ async def reset_password(body: ResetPasswordRequest):
     # runs as owner: password_resets is owner-only, and updating
     # users.password_hash needs the same owner path login itself uses.
     token_hash = sha256_hex(body.token)
+    error: HTTPException | None = None
+
     async with as_owner() as conn:
+        # Mark-then-act, and the mark is the single-use gate: an UPDATE
+        # that both consumes the token and re-checks it is still live, in
+        # one atomic statement, so two concurrent reset requests with the
+        # same token cannot both pass this check the way two separate
+        # SELECT-then-UPDATE steps could race to do. Exactly one of them
+        # gets a row back; the other gets none and is rejected below, same
+        # as a token that was never valid.
         cur = await conn.execute(
-            "select id, user_id, expires_at, used_at from password_resets "
-            "where token_hash = %s",
+            """
+            update password_resets set used_at = now()
+            where token_hash = %s and used_at is null and expires_at > now()
+            returning id, user_id
+            """,
             (token_hash,),
         )
         row = await cur.fetchone()
         if row is None:
-            raise HTTPException(status_code=401, detail="invalid_token")
-        reset_id, user_id, expires_at, used_at = row
-        if used_at is not None or expires_at < datetime.now(timezone.utc):
-            raise HTTPException(status_code=401, detail="invalid_token")
+            error = HTTPException(status_code=401, detail="invalid_token")
+        else:
+            _, user_id = row
+            cur = await conn.execute(
+                "select active from profiles where id = %s", (user_id,)
+            )
+            profile_row = await cur.fetchone()
+            active = profile_row[0] if profile_row is not None else False
+            if not active:
+                # Same reasoning as /auth/refresh: a deactivated account
+                # must not be able to set a new password or keep any
+                # session alive. The token above is already consumed
+                # either way - a deactivated account does not get to try
+                # it again once reactivated.
+                await revoke_all_refresh_tokens(conn, user_id)
+                error = HTTPException(status_code=403, detail="deactivated")
+            else:
+                new_hash = hash_password(body.password)
+                await conn.execute(
+                    "update users set password_hash = %s where id = %s",
+                    (new_hash, user_id),
+                )
+                await revoke_all_refresh_tokens(conn, user_id)
 
-        cur = await conn.execute("select active from profiles where id = %s", (user_id,))
-        profile_row = await cur.fetchone()
-        active = profile_row[0] if profile_row is not None else False
-        if not active:
-            # Same reasoning as /auth/refresh: a deactivated account must
-            # not be able to set a new password or keep any session alive.
-            # Revoked in a transaction of its own so it survives the 403
-            # raised right after it, rather than being rolled back with
-            # the rest of this as_owner() block.
-            async with as_owner() as revoke_conn:
-                await revoke_all_refresh_tokens(revoke_conn, user_id)
-            raise HTTPException(status_code=403, detail="deactivated")
-
-        new_hash = hash_password(body.password)
-        await conn.execute(
-            "update users set password_hash = %s where id = %s", (new_hash, user_id)
-        )
-        await conn.execute(
-            "update password_resets set used_at = now() where id = %s", (reset_id,)
-        )
-        await revoke_all_refresh_tokens(conn, user_id)
+    if error is not None:
+        raise error
     return {"ok": True}
