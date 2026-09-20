@@ -32,6 +32,15 @@ const url = process.env.EXPO_PUBLIC_SUPABASE_URL!;
 const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
+if (!process.env.SUPABASE_DB_URL) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    'SUPABASE_DB_URL is not set: skipping the security_barrier leaky-predicate ' +
+      "test in 'tenant isolation cannot be bypassed' (see tests/README.md - " +
+      'PostgREST cannot express that test, so it needs a raw Postgres connection).',
+  );
+}
+
 function newClient(key: string): SupabaseClient {
   return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 }
@@ -431,7 +440,15 @@ describe('tenant isolation cannot be bypassed', () => {
     expect(data).toEqual([]);
   });
 
-  it('a predicate that only errors on business B\'s underlying row does not leak its existence via that error', async () => {
+  // This one needs a direct Postgres connection (SUPABASE_DB_URL), not just
+  // the anon/service-role keys the rest of the suite runs on - see the
+  // comment inside the test for why, and tests/README.md for why that
+  // credential is kept optional. Skip cleanly and say so by name rather
+  // than making the whole suite depend on a credential far more sensitive
+  // than what every other test needs.
+  const itWithDbUrl = process.env.SUPABASE_DB_URL ? it : it.skip;
+
+  itWithDbUrl('a predicate that only errors on business B\'s underlying row does not leak its existence via that error (requires SUPABASE_DB_URL)', async () => {
     // This is the textbook security_barrier proof (see the Postgres manual's
     // own CREATE VIEW ... WITH (security_barrier) example): business B's
     // fixture lot has expires_on = 2027-01-01 and no business-A lot shares
@@ -477,7 +494,7 @@ describe('tenant isolation cannot be bypassed', () => {
 // ============================================================ unauthenticated / deactivated callers
 
 describe('auth_business_id() and auth_role() are null with no active session', () => {
-  it('are null for a caller with no session at all, and the three views return zero rows', async () => {
+  it('are null for a caller with no session at all, and the three views deny outright rather than returning zero rows', async () => {
     const anon = newClient(anonKey);
     const { data: businessIdData, error: businessIdError } = await anon.rpc('auth_business_id');
     expect(businessIdError).toBeNull();
@@ -487,10 +504,17 @@ describe('auth_business_id() and auth_role() are null with no active session', (
     expect(roleError).toBeNull();
     expect(roleData).toBeNull();
 
+    // anon has no select grant on these views at all (0002 revokes it
+    // explicitly): a caller with no session gets a permission error, not
+    // an empty result. Zero rows would say "you asked correctly and there
+    // is nothing here"; a permission error says "you are not allowed to
+    // ask", which is the true statement for a caller with no session, and
+    // the one that fails loudly if a screen ever queries before signing in.
     for (const view of ['lots_view', 'lot_stock', 'product_stock'] as const) {
       const { data, error } = await anon.from(view).select('*');
-      expect(error).toBeNull();
-      expect(data).toEqual([]);
+      expect(error).not.toBeNull();
+      expect(error?.code).toBe('42501'); // insufficient_privilege
+      expect(data).toBeNull();
     }
   });
 
@@ -512,11 +536,47 @@ describe('auth_business_id() and auth_role() are null with no active session', (
       expect(roleError).toBeNull();
       expect(roleData).toBeNull();
 
+      // Unlike the anonymous case above, this caller *is* authenticated and
+      // still has select on the three views - auth_business_id() is null
+      // only because of the "and active" filter inside it, so the views'
+      // own tenant filter correctly excludes every row. Zero rows is the
+      // right answer here, not a permission error.
       for (const view of ['lots_view', 'lot_stock', 'product_stock'] as const) {
         const { data, error } = await client.from(view).select('*');
         expect(error).toBeNull();
         expect(data).toEqual([]);
       }
+    } finally {
+      await deleteUser(throwaway.id);
+    }
+  });
+});
+
+// ============================================================ role/active changes are gated by the caller
+
+describe('profiles_block_self_role_change_trg gates role/active changes by the caller\'s role, not by whose row it is', () => {
+  it('an operatore cannot set their own role to titolare', async () => {
+    const throwaway = await createUser(businessAId, 'operatore');
+    const client = await signIn(throwaway.email, throwaway.password);
+    try {
+      const { error } = await client.from('profiles').update({ role: 'titolare' }).eq('id', throwaway.id);
+      expect(error).not.toBeNull();
+
+      const { data: afterAttempt } = await admin.from('profiles').select('role').eq('id', throwaway.id).single();
+      expect(afterAttempt?.role).toBe('operatore');
+    } finally {
+      await deleteUser(throwaway.id);
+    }
+  });
+
+  it('a titolare can change a responsabile to operatore, including via the colleague-update policy', async () => {
+    const throwaway = await createUser(businessAId, 'responsabile');
+    try {
+      const { error } = await titolare.from('profiles').update({ role: 'operatore' }).eq('id', throwaway.id);
+      expect(error).toBeNull();
+
+      const { data: afterChange } = await admin.from('profiles').select('role').eq('id', throwaway.id).single();
+      expect(afterChange?.role).toBe('operatore');
     } finally {
       await deleteUser(throwaway.id);
     }

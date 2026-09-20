@@ -27,7 +27,11 @@ create policy businesses_update on businesses for update to authenticated
 -- Everyone sees their colleagues; only the titolare edits someone else's
 -- profile. A user may also edit their own row (e.g. full_name), but see the
 -- trigger below: that self-update path must not become a way to grant
--- yourself the titolare role or reactivate yourself.
+-- yourself the titolare role or reactivate yourself. There is deliberately
+-- no delete policy: people are deactivated (profiles.active), never
+-- deleted, so lots.created_by/movements.created_by never have to explain a
+-- vanished user - see the "on delete restrict" comments on those columns
+-- in 0001.
 
 create policy profiles_select on profiles for select to authenticated
   using (business_id = auth_business_id());
@@ -43,21 +47,37 @@ create policy profiles_update_titolare on profiles for update to authenticated
 -- compare old and new values of the same column in one expression. Without
 -- this guard, profiles_update_self would let an operatore set their own
 -- role to titolare, or flip their own active flag back on after being
--- deactivated. The guard only fires on self-updates (old.id = auth.uid()):
--- a titolare changing a colleague's role or active flag through
--- profiles_update_titolare touches a different row and is unaffected. It is
--- also inert for the service role used in test fixtures and admin tooling,
--- since auth.uid() is null outside of a user session and null never equals
--- old.id.
+-- deactivated.
+--
+-- The gate is the caller's own role, not whose row is being written: if
+-- role or active is changing and the caller is not a titolare, reject.
+-- That lets a titolare change anyone's role or active flag, including
+-- their own (ownership transfer is a titolare action, per the functional
+-- spec, with its own double-confirmation UI - not this trigger's job), and
+-- lets everyone else update their own row (full_name, etc.) but never
+-- those two columns, on their own row or anyone else's. It is inert for
+-- the service role used in test fixtures and admin tooling: auth_role()
+-- resolves through auth.uid(), which is null outside of a user session,
+-- and the role-gate below uses plain "<>" (not "is distinct from") so
+-- that a null auth_role() makes the whole condition null, not true -
+-- plpgsql treats a null "if" condition as false, so the guard does not
+-- fire for the service role.
+--
+-- Deliberately left out: a titolare cannot step down or deactivate
+-- themselves while they are the only titolare of their business. That
+-- rule needs a count of active titolare in the business, which belongs
+-- with the Utenti screen that manages this transfer (not part of this
+-- block) - not baked into this trigger. Leaving it out here is a known
+-- gap, not an oversight.
 create or replace function profiles_block_self_role_change()
 returns trigger
 language plpgsql
 set search_path = public
 as $$
 begin
-  if auth.uid() = old.id
-     and (new.role is distinct from old.role or new.active is distinct from old.active) then
-    raise exception 'cannot change your own role or active flag';
+  if (new.role is distinct from old.role or new.active is distinct from old.active)
+     and auth_role() <> 'titolare' then
+    raise exception 'only a titolare can change role or active';
   end if;
   return new;
 end;
@@ -112,6 +132,11 @@ create policy events_write on events for all to authenticated
 -- below: it is not null and on delete restrict precisely because "who
 -- received the goods" is an audit fact, so nothing should be able to write
 -- someone else's uid into it.
+--
+-- There is also deliberately no delete policy on lots. A lot is part of
+-- the traceability record in the same way a movement is: correcting a
+-- mistake goes through lots_update (or, once movements exist against it,
+-- through a reversal), not by removing the row.
 create policy lots_insert on lots for insert to authenticated
   with check (business_id = auth_business_id() and created_by = auth.uid());
 create policy lots_update on lots for update to authenticated
@@ -159,13 +184,14 @@ grant select on lots_view to authenticated;
 grant select on lot_stock to authenticated;
 grant select on product_stock to authenticated;
 
--- Also granted to anon (no session at all) so that an unauthenticated probe
--- against these views is a deterministic empty result rather than depending
--- on whatever ambient default privileges the project happens to have. This
--- is safe to grant: auth_business_id() is null with no session, so the
--- views' own "where business_id = auth_business_id()" filters out every
--- row before anon sees anything. The base tables are not granted to anon at
--- all; only the views, which cannot leak a column they do not expose.
-grant select on lots_view to anon;
-grant select on lot_stock to anon;
-grant select on product_stock to anon;
+-- anon gets nothing on these views, or on any other table in this file.
+-- An unauthenticated caller getting zero rows back would say "you asked
+-- correctly and there is nothing here"; a permission error says "you are
+-- not allowed to ask" - the second is the truth for a caller with no
+-- session, and it is the one that fails loudly if a screen ever queries
+-- one of these views before a session exists, rather than silently
+-- rendering an empty state that looks like "no data yet". The revoke is
+-- explicit, not just an omitted grant, because Supabase's own default
+-- privileges may otherwise hand anon select on a newly created relation
+-- regardless of what this file asks for.
+revoke select on lots_view, lot_stock, product_stock from anon;

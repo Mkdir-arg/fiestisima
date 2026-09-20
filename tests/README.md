@@ -38,21 +38,38 @@ exactamente lo que están probando.
 
 ## Variables de entorno
 
-Crear `.env.test` en la raíz (está en `.gitignore`, nunca se commitea):
+Crear `.env.test` en la raíz (está en `.gitignore`, nunca se commitea).
+
+**Para que la suite corra:**
 
     EXPO_PUBLIC_SUPABASE_URL=https://<ref>.supabase.co
     EXPO_PUBLIC_SUPABASE_ANON_KEY=<anon key>
     SUPABASE_SERVICE_ROLE_KEY=<service role key>
+
+La service role key aparece en Project Settings → API. Con estas tres alcanza
+para correr toda la suite salvo una prueba (ver abajo).
+
+**Extra, opcional, para una sola prueba:**
+
     SUPABASE_DB_URL=postgresql://postgres:<password>@<host>:5432/postgres
 
-La service role key aparece en Project Settings → API. `SUPABASE_DB_URL` es
-la cadena de conexión directa (o el connection pooler) de Project Settings →
-Database: la necesita únicamente la prueba de `security_barrier` ("un
-predicado que sólo falla contra la fila de business B no debe filtrar su
-existencia"), porque ese ataque se arma con un WHERE arbitrario que la
-gramática de filtros de PostgREST no permite expresar - hay que hablarle a
-Postgres directo, autenticado como si fuera PostgREST (`set local role
-authenticated` + `request.jwt.claims`), para replicar el escenario real.
+`SUPABASE_DB_URL` es la cadena de conexión directa (o el connection pooler) de
+Project Settings → Database. La necesita únicamente la prueba de
+`security_barrier` en "tenant isolation cannot be bypassed" ("un predicado
+que sólo falla contra la fila de business B no debe filtrar su existencia"),
+porque ese ataque se arma con un WHERE arbitrario ("1 / (expires_on - fecha)"
+sobre una fila concreta) que la gramática de filtros de PostgREST no permite
+expresar en absoluto - sólo acepta operadores fijos contra literales, nunca
+una expresión arbitraria provista por el caller. Para reproducir el ataque de
+verdad hay que hablarle a Postgres directo, autenticado como si fuera
+PostgREST (`set local role authenticated` + `request.jwt.claims`).
+
+Sin `SUPABASE_DB_URL` esa prueba se salta sola (`it.skip`) y la suite avisa
+por consola al arrancar con el nombre exacto de la variable que falta; el
+resto de la suite corre igual. No hace falta esa credencial para nada más, y
+no vale la pena que una prueba opcional le exija a quien corre `test:rls`
+una credencial bastante más sensible que el resto (una conexión directa a
+Postgres, no una API key con alcance acotado).
 
 Ninguna de estas claves va en un archivo commiteado. `SUPABASE_SERVICE_ROLE_KEY`
 y `SUPABASE_DB_URL` en particular tienen acceso total a la base: tratarlas
@@ -77,9 +94,13 @@ seed de ningún tipo.
 Las tres vistas filtran por `auth_business_id()`, que resuelve a través de
 `auth.uid()`. La service role key no lleva claim `sub`, así que
 `auth.uid()` (y por lo tanto `auth_business_id()`) también da `null` para
-ella - consultar esas vistas con la service role key devuelve siempre cero
-filas, por el mismo mecanismo que bloquea a un caller sin sesión. Por eso
-en la suite la service role key sólo se usa contra las tablas base (`lots`,
-`movements`, `profiles`, ...), donde sí tiene bypass de RLS; para leer stock
-o precios "como los vería un usuario", las pruebas siempre usan los
-clientes `titolare`/`operatore` autenticados.
+ella. A diferencia de `anon` (que en 0002 no tiene ningún `grant select`
+sobre estas vistas, y por lo tanto recibe un error de permiso), la service
+role key sí conserva el `select` que Supabase le otorga por defecto: la
+consulta no falla, simplemente el filtro interno de la vista
+(`business_id = auth_business_id()`) no matchea ninguna fila, y el resultado
+es siempre un array vacío. Mismo destino final (nada de datos reales), por
+dos caminos distintos. Por eso en la suite la service role key sólo se usa
+contra las tablas base (`lots`, `movements`, `profiles`, ...), donde sí tiene
+bypass de RLS; para leer stock o precios "como los vería un usuario", las
+pruebas siempre usan los clientes `titolare`/`operatore` autenticados.
