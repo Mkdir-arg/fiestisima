@@ -233,26 +233,33 @@ afterAll(async () => {
   // dependency order - movements, then lots, then profiles, then
   // businesses - avoids that entirely, and checking each step's error
   // means a teardown regression fails this hook loudly instead of leaving
-  // two businesses, a full catalogue and three auth users behind on every
-  // run without a trace.
-  if (createdBusinessIds.length > 0) {
-    const movementsDel = await admin.from('movements').delete().in('business_id', createdBusinessIds);
-    if (movementsDel.error) throw new Error(`teardown: movements: ${movementsDel.error.message}`);
+  // two businesses and a full catalogue behind on every run without a
+  // trace. That per-step throw must not skip the auth.users cleanup below
+  // it, though - a business-row failure and a stray auth user are two
+  // different leaks, and fixing the first should not reintroduce the
+  // second - so the delete chain runs inside try/finally, and the user
+  // loop always runs, whether or not the chain above it succeeded.
+  try {
+    if (createdBusinessIds.length > 0) {
+      const movementsDel = await admin.from('movements').delete().in('business_id', createdBusinessIds);
+      if (movementsDel.error) throw new Error(`teardown: movements: ${movementsDel.error.message}`);
 
-    const lotsDel = await admin.from('lots').delete().in('business_id', createdBusinessIds);
-    if (lotsDel.error) throw new Error(`teardown: lots: ${lotsDel.error.message}`);
+      const lotsDel = await admin.from('lots').delete().in('business_id', createdBusinessIds);
+      if (lotsDel.error) throw new Error(`teardown: lots: ${lotsDel.error.message}`);
 
-    const profilesDel = await admin.from('profiles').delete().in('business_id', createdBusinessIds);
-    if (profilesDel.error) throw new Error(`teardown: profiles: ${profilesDel.error.message}`);
+      const profilesDel = await admin.from('profiles').delete().in('business_id', createdBusinessIds);
+      if (profilesDel.error) throw new Error(`teardown: profiles: ${profilesDel.error.message}`);
 
-    // Everything else business-scoped (suppliers, categories, products,
-    // events, invitations) has no restrict pointing at it once lots and
-    // movements are gone, so the businesses' own cascade handles the rest.
-    const businessesDel = await admin.from('businesses').delete().in('id', createdBusinessIds);
-    if (businessesDel.error) throw new Error(`teardown: businesses: ${businessesDel.error.message}`);
-  }
-  for (const id of createdUserIds) {
-    await deleteUser(id);
+      // Everything else business-scoped (suppliers, categories, products,
+      // events, invitations) has no restrict pointing at it once lots and
+      // movements are gone, so the businesses' own cascade handles the rest.
+      const businessesDel = await admin.from('businesses').delete().in('id', createdBusinessIds);
+      if (businessesDel.error) throw new Error(`teardown: businesses: ${businessesDel.error.message}`);
+    }
+  } finally {
+    for (const id of createdUserIds) {
+      await deleteUser(id);
+    }
   }
 });
 
@@ -397,9 +404,10 @@ describe('the permission matrix: rights the earlier rounds left untested', () =>
   });
 
   it('an operatore cannot update a lot', async () => {
+    const originalCode = `OP-UPD-${randomUUID()}`;
     const fixture = await admin
       .from('lots')
-      .insert({ business_id: businessAId, product_id: productAId, lot_code: `OP-UPD-${randomUUID()}`, created_by: titolareId })
+      .insert({ business_id: businessAId, product_id: productAId, lot_code: originalCode, created_by: titolareId })
       .select('id')
       .single();
     expect(fixture.error).toBeNull();
@@ -409,12 +417,15 @@ describe('the permission matrix: rights the earlier rounds left untested', () =>
       // Same shape as the movement-immutability tests above: lots_update's
       // USING clause excludes the row for an operatore, so PostgREST
       // reports success on zero matched rows rather than an error. The
-      // invariant is that the row does not change.
+      // invariant is that the row does not change - asserted against the
+      // known original value, not just "not the attempted one", so this
+      // cannot pass on a row that silently failed to come back at all.
       const updateResult = await operatore.from('lots').update({ lot_code: 'should-not-apply' }).eq('id', lotId);
       expect(updateResult.error).toBeNull();
 
-      const { data } = await admin.from('lots').select('lot_code').eq('id', lotId).single();
-      expect(data?.lot_code).not.toBe('should-not-apply');
+      const { data, error } = await admin.from('lots').select('lot_code').eq('id', lotId).single();
+      expect(error).toBeNull();
+      expect(data?.lot_code).toBe(originalCode);
     } finally {
       await admin.from('lots').delete().eq('id', lotId);
     }
@@ -461,19 +472,32 @@ describe('the permission matrix: rights the earlier rounds left untested', () =>
     });
 
     it('a responsabile cannot update the business', async () => {
-      const { data: before } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      const { data: before, error: beforeError } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      expect(beforeError).toBeNull();
+      expect(before?.name).not.toBeUndefined();
+
       const updateResult = await responsabile.from('businesses').update({ name: 'should-not-apply' }).eq('id', businessAId);
       expect(updateResult.error).toBeNull(); // same silent-zero-rows shape as the write-denial cases above
-      const { data: after } = await admin.from('businesses').select('name').eq('id', businessAId).single();
-      expect(after?.name).toBe(before?.name);
+
+      // Compared against the captured original, not just "before === after"
+      // undefined-to-undefined, which would also pass if this read came
+      // back empty.
+      const { data: after, error: afterError } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      expect(afterError).toBeNull();
+      expect(after?.name).toBe(before!.name);
     });
 
     it('an operatore cannot update the business', async () => {
-      const { data: before } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      const { data: before, error: beforeError } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      expect(beforeError).toBeNull();
+      expect(before?.name).not.toBeUndefined();
+
       const updateResult = await operatore.from('businesses').update({ name: 'should-not-apply' }).eq('id', businessAId);
       expect(updateResult.error).toBeNull();
-      const { data: after } = await admin.from('businesses').select('name').eq('id', businessAId).single();
-      expect(after?.name).toBe(before?.name);
+
+      const { data: after, error: afterError } = await admin.from('businesses').select('name').eq('id', businessAId).single();
+      expect(afterError).toBeNull();
+      expect(after?.name).toBe(before!.name);
     });
   });
 });
@@ -733,6 +757,20 @@ describe('auth_business_id() and auth_role() are null with no active session', (
       expect(error?.code).toBe('42501'); // insufficient_privilege
       expect(data).toBeNull();
     }
+  });
+
+  it('is denied on lots itself, not just on the three views', async () => {
+    // This is finding 7 from its own review round: the earlier anon revoke
+    // only named the three views, leaving lots - the table that actually
+    // holds unit_price and document_url - on whatever default select
+    // privilege Supabase grants new tables. 0002 now revokes select on
+    // lots from anon explicitly too; this asserts that directly, rather
+    // than only through the views that read from it.
+    const anon = newClient(anonKey);
+    const { data, error } = await anon.from('lots').select('*');
+    expect(error).not.toBeNull();
+    expect(error?.code).toBe('42501');
+    expect(data).toBeNull();
   });
 
   it('are null for a deactivated profile, and the three views return zero rows', async () => {

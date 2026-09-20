@@ -235,10 +235,35 @@ grant select (
 -- business_id outright. Column privileges close both without relying on
 -- the update policy to keep enforcing it: this cannot be bypassed by a
 -- future policy edit the way the with check above could be, because it is
--- not a policy at all. INSERT is untouched (lots_insert still sets both
--- columns when a lot is created); only UPDATE on these two columns is
--- revoked.
-revoke update (created_by, business_id) on lots from authenticated;
+-- not a policy at all.
+--
+-- This has to be a table-level revoke followed by a column-level grant
+-- back, the same shape as the SELECT handling above, not a column-level
+-- revoke on its own. Per the Postgres GRANT/REVOKE reference: "if a role
+-- has been granted privileges on a table, then revoking the same
+-- privileges from individual columns will have no effect" - a column-level
+-- revoke cannot claw anything back from a broader table-level grant that
+-- is still in force, and Supabase's default privileges grant UPDATE on the
+-- whole table to authenticated. An earlier version of this file tried the
+-- column-level revoke alone; it is a silent no-op (Postgres only warns),
+-- so created_by stayed rewritable while the migration still applied
+-- cleanly - exactly the kind of failure that looks fine until someone
+-- checks. INSERT is untouched either way (lots_insert still sets
+-- created_by/business_id when a lot is created); this only ever governs
+-- UPDATE.
+--
+-- unit_price and document_url are deliberately in the grant-back list:
+-- UPDATE and SELECT are separate privileges, and a titolare correcting a
+-- price needs to write it without being able to read it off the base
+-- table (reads of it still only ever happen through lots_view). The
+-- WHERE clause on a correction still works because SELECT on id and
+-- business_id is granted per column above, independent of this UPDATE
+-- grant.
+revoke update on lots from authenticated;
+grant update (
+  product_id, supplier_id, lot_code, expires_on,
+  unit_price, document_url, received_on
+) on lots to authenticated;
 
 -- authenticated reads lots through the view, never the base table.
 grant select on lots_view to authenticated;
