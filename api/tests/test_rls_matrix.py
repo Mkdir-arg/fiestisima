@@ -616,6 +616,23 @@ async def test_received_on_defaults_to_rome_date(business):
             await conn.execute("delete from products where id = %s", (product_id,))
 
 
+async def test_received_on_default_expression_uses_europe_rome(owner):
+    # A deterministic companion to the instant-comparison test above: reads
+    # the column default straight from the catalog, so this fails the
+    # moment the DEFAULT clause itself changes zone, with no dependence on
+    # wall-clock timing at all.
+    cur = await owner.execute(
+        """
+        select pg_get_expr(d.adbin, d.adrelid)
+        from pg_attrdef d
+        join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+        where d.adrelid = 'lots'::regclass and a.attname = 'received_on'
+        """
+    )
+    (default_expr,) = await cur.fetchone()
+    assert "Europe/Rome" in default_expr
+
+
 async def test_occurred_at_explicit_is_preserved_created_at_is_insert_time(business):
     async with as_owner() as conn:
         product_id = await _insert_product(conn, business.business_id)

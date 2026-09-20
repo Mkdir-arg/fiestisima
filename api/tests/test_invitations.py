@@ -1,6 +1,7 @@
 """Invite -> preview -> accept, resend, cancel. Exercised end to end through
 httpx against the real FastAPI app, mirroring test_auth.py's style.
 """
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -61,7 +62,8 @@ async def test_titolare_invites_gets_201_and_mail_has_invito_link(
     assert body["email"] == "new-invitee@fiestisima-tests.invalid"
     assert body["role"] == "operatore"
     assert "token" not in body
-    assert "id" not in body or body["id"]
+    assert uuid.UUID(body["id"])
+    assert body["mail_sent"] is True
 
     assert len(capturing_mailer.sent) == 1
     mail = capturing_mailer.sent[0]
@@ -306,3 +308,143 @@ async def test_delete_by_titolare_then_get_is_404(client, business):
 
     get_resp = await client.get(f"/invitations/{token}")
     assert get_resp.status_code == 404
+
+
+async def test_titolare_invites_a_titolare_is_201(client, business, capturing_mailer):
+    # Ownership handoff: inviting a peer titolare is a legitimate,
+    # unrestricted role choice - invitations_all only gates who may invite,
+    # never which role the invitee gets.
+    token = await _access_token(client, business.titolare_email, business.password)
+    resp = await client.post(
+        "/invitations",
+        headers=_auth(token),
+        json={
+            "email": "second-titolare@fiestisima-tests.invalid",
+            "full_name": "Secondo Titolare",
+            "role": "titolare",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["role"] == "titolare"
+
+    async with as_owner() as conn:
+        await conn.execute(
+            "delete from invitations where business_id = %s", (business.business_id,)
+        )
+
+
+async def test_preview_of_an_accepted_invitation_is_404(client, business):
+    async with as_owner() as conn:
+        invitation_id, token = await _create_invitation(
+            conn, business.business_id, email="already-accepted@fiestisima-tests.invalid"
+        )
+
+    accept_resp = await client.post(
+        f"/invitations/{token}/accept",
+        json={"full_name": "Gia Accettato", "password": "Already-Accepted-9"},
+    )
+    assert accept_resp.status_code == 200, accept_resp.text
+    user_id = accept_resp.json()["profile"]["id"]
+
+    preview_resp = await client.get(f"/invitations/{token}")
+    assert preview_resp.status_code == 404
+
+    async with as_owner() as conn:
+        await conn.execute("delete from profiles where id = %s", (user_id,))
+        await conn.execute("delete from users where id = %s", (user_id,))
+        await conn.execute("delete from invitations where id = %s", (invitation_id,))
+
+
+async def test_accept_with_email_differing_only_by_case_is_409_and_stays_pending(
+    client, business
+):
+    # citext (0001) makes users.email case-insensitive: an invitation for
+    # an upper/lower-cased variant of an address that already has a users
+    # row must collide the same way an exact match does.
+    mixed_case_email = business.titolare_email.upper()
+    async with as_owner() as conn:
+        invitation_id, token = await _create_invitation(
+            conn, business.business_id, email=mixed_case_email
+        )
+
+    resp = await client.post(
+        f"/invitations/{token}/accept",
+        json={"full_name": "Case Collide", "password": "Case-Collide-Pass-1"},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "email_taken"
+
+    async with as_owner() as conn:
+        cur = await conn.execute(
+            "select accepted_at from invitations where id = %s", (invitation_id,)
+        )
+        (accepted_at,) = await cur.fetchone()
+        assert accepted_at is None
+        await conn.execute("delete from invitations where id = %s", (invitation_id,))
+
+
+async def test_resend_of_an_accepted_invitation_is_404(client, business):
+    async with as_owner() as conn:
+        invitation_id, token = await _create_invitation(
+            conn, business.business_id, email="resend-accepted@fiestisima-tests.invalid"
+        )
+
+    accept_resp = await client.post(
+        f"/invitations/{token}/accept",
+        json={"full_name": "Gia Dentro", "password": "Resend-Accepted-2"},
+    )
+    assert accept_resp.status_code == 200, accept_resp.text
+    user_id = accept_resp.json()["profile"]["id"]
+
+    titolare_token = await _access_token(client, business.titolare_email, business.password)
+    resend_resp = await client.post(
+        f"/invitations/{invitation_id}/resend", headers=_auth(titolare_token)
+    )
+    assert resend_resp.status_code == 404
+
+    async with as_owner() as conn:
+        await conn.execute("delete from profiles where id = %s", (user_id,))
+        await conn.execute("delete from users where id = %s", (user_id,))
+        await conn.execute("delete from invitations where id = %s", (invitation_id,))
+
+
+class _FailingMailer:
+    async def send(self, to: str, subject: str, body: str) -> None:
+        raise RuntimeError("mail provider is down")
+
+
+async def test_create_invitation_survives_mailer_failure_and_reports_mail_sent_false(
+    client, business, monkeypatch
+):
+    monkeypatch.setattr(invitations_module, "get_mailer", lambda: _FailingMailer())
+    token = await _access_token(client, business.titolare_email, business.password)
+    resp = await client.post(
+        "/invitations",
+        headers=_auth(token),
+        json={
+            "email": "mail-fails@fiestisima-tests.invalid",
+            "full_name": "Mail Fails",
+            "role": "operatore",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["mail_sent"] is False
+
+    # The row committed despite the mail failure: a retry must see it as
+    # already pending, not silently succeed and double-invite.
+    retry = await client.post(
+        "/invitations",
+        headers=_auth(token),
+        json={
+            "email": "mail-fails@fiestisima-tests.invalid",
+            "full_name": "Mail Fails",
+            "role": "operatore",
+        },
+    )
+    assert retry.status_code == 409
+    assert retry.json()["detail"] == "invitation_pending"
+
+    async with as_owner() as conn:
+        await conn.execute(
+            "delete from invitations where business_id = %s", (business.business_id,)
+        )

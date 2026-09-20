@@ -1,6 +1,6 @@
 """Invite, preview, accept, resend, cancel.
 
-Three call sites here run as owner, each named per the design's rule that
+Two call sites here run as owner, each named per the design's rule that
 every as_owner() use say why:
 - GET /invitations/{token} is public and read-only: no caller identity to
   set, and it exposes only full_name/business name/expires_at, never the
@@ -28,6 +28,7 @@ not-an-error rule this file follows for PATCH /users/{id} and PATCH
 42501 here, because an INSERT's WITH CHECK failure IS a Postgres error
 (there is no existing row to filter).
 """
+import logging
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -41,6 +42,8 @@ from ..db import as_owner, as_user
 from ..mail import get_mailer
 from ..security import CurrentUser, create_access_token, hash_password, issue_refresh_token, require_user
 from .auth import PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, TokenPair, _load_profile
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/invitations", tags=["invitations"])
 
@@ -66,6 +69,11 @@ class InvitationOut(BaseModel):
     full_name: str
     role: str
     expires_at: datetime
+    # False when the row committed but the mail provider failed - the
+    # invitation still exists and can be resent; the caller should not be
+    # told the whole request failed (mailing is best-effort, the write is
+    # not) but does need to know the link never actually went out.
+    mail_sent: bool
 
 
 class InvitationPreview(BaseModel):
@@ -79,13 +87,23 @@ class AcceptInvitationRequest(BaseModel):
     password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
 
 
-async def _send_invite_mail(email: str, token) -> None:
+async def _send_invite_mail(email: str, token) -> bool:
+    """Sends the invite mail after its transaction has already committed,
+    and never lets a mail-provider failure turn a committed invitation into
+    a 500 - retrying the request would just hit invitation_pending (409)
+    for a row that already exists. Returns whether the send succeeded so
+    the caller can report it in the response instead."""
     link = f"{settings.site_url}/invito/{token}"
-    await get_mailer().send(
-        to=email,
-        subject="Sei stato invitato su Fiestisima",
-        body=f"Completa la registrazione: {link}",
-    )
+    try:
+        await get_mailer().send(
+            to=email,
+            subject="Sei stato invitato su Fiestisima",
+            body=f"Completa la registrazione: {link}",
+        )
+        return True
+    except Exception:
+        logger.exception("failed to send invitation mail to=%s", email)
+        return False
 
 
 # ------------------------------------------------------------------ create
@@ -131,8 +149,11 @@ async def create_invitation(
     # Mailed after the transaction committed, not before: a mail that goes
     # out for a row that never actually got committed would be worse than
     # a committed row whose mail is delayed or lost.
-    await _send_invite_mail(created["email"], created["token"])
-    return InvitationOut(**{k: v for k, v in created.items() if k != "token"})
+    mail_sent = await _send_invite_mail(created["email"], created["token"])
+    return InvitationOut(
+        mail_sent=mail_sent,
+        **{k: v for k, v in created.items() if k != "token"},
+    )
 
 
 # ------------------------------------------------------------------ preview
@@ -191,6 +212,10 @@ async def accept_invitation(token: UUID, body: AcceptInvitationRequest):
             business_id, email, role = row
             password_hash = hash_password(body.password)
             try:
+                # citext (see 0001) makes this comparison and the unique
+                # constraint it can violate case-insensitive: an email
+                # differing only by case from an existing users row still
+                # collides here, not just a byte-for-byte match.
                 cur = await conn.execute(
                     "insert into users (email, password_hash) values (%s, %s) returning id",
                     (email, password_hash),
@@ -236,7 +261,7 @@ async def resend_invitation(
         cur = await conn.execute(
             """
             update invitations set expires_at = now() + interval '7 days'
-            where id = %s
+            where id = %s and accepted_at is null
             returning id, email, full_name, role, expires_at, token
             """,
             (invitation_id,),
@@ -244,9 +269,10 @@ async def resend_invitation(
         row = await cur.fetchone()
         if row is None:
             # Covers: no such invitation, a different business's
-            # invitation, and a non-titolare caller alike - invitations_all's
-            # USING clause filters all three the same way, with no error to
-            # tell them apart (see the module comment).
+            # invitation, a non-titolare caller (invitations_all's USING
+            # clause filters all three the same way, with no error to tell
+            # them apart - see the module comment), and an already-accepted
+            # invitation - resending a dead link is not a thing to do.
             error = HTTPException(status_code=404, detail="not_found")
         else:
             created = {
@@ -256,8 +282,11 @@ async def resend_invitation(
 
     if error is not None:
         raise error
-    await _send_invite_mail(created["email"], created["token"])
-    return InvitationOut(**{k: v for k, v in created.items() if k != "token"})
+    mail_sent = await _send_invite_mail(created["email"], created["token"])
+    return InvitationOut(
+        mail_sent=mail_sent,
+        **{k: v for k, v in created.items() if k != "token"},
+    )
 
 
 # ------------------------------------------------------------------- delete
@@ -267,7 +296,10 @@ async def delete_invitation(
     invitation_id: UUID, current_user: CurrentUser = Depends(require_user)
 ):
     async with as_user(current_user.id) as conn:
-        cur = await conn.execute("delete from invitations where id = %s", (invitation_id,))
+        cur = await conn.execute(
+            "delete from invitations where id = %s and accepted_at is null",
+            (invitation_id,),
+        )
         deleted = cur.rowcount
     if deleted == 0:
         raise HTTPException(status_code=404, detail="not_found")

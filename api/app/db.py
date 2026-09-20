@@ -17,8 +17,14 @@ async def as_user(user_id: UUID):
 
 @asynccontextmanager
 async def as_owner():
-    """-- runs as owner: no set role, RLS does not apply. Only login, invitation
-    acceptance and migrations may use this. Say why at every call site."""
+    """-- runs as owner: no set role, RLS does not apply. Call sites: login,
+    refresh/logout/password (routers/auth.py - refresh_tokens/password_resets/
+    login_attempts have no RLS and no grants to app_user), invitation preview
+    and acceptance (routers/invitations.py), the post-deactivation refresh
+    token revoke in PATCH /users/{id} (routers/users.py, in its own block
+    after the as_user() write has committed), migrations (scripts/migrate.py),
+    and /health (main.py, no caller identity to set). Say why at every call
+    site."""
     async with pool.connection() as conn:
         async with conn.transaction():
             yield conn
