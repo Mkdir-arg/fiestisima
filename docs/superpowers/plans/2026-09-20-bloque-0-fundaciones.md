@@ -22,6 +22,7 @@
 - **Colores** (exactos, de la sección 5 de la spec): fondo `#F2F2F7` · superficie `#FFFFFF` · separador `#E5E5EA` · texto `#000000` · texto secundario `#6C6C70` · azul `#0066E0` · scaduto fondo `#FFE5E3` texto `#C9251B` · in scadenza fondo `#FFF0D9` texto `#9A5400`.
 - **Táctil**: altura mínima 44 px en todo elemento interactivo.
 - **Nada de verde para estados correctos.** Un lote en orden es gris.
+- **Los tests de componentes se escriben `async`.** En `@testing-library/react-native` 14, `render` y `fireEvent` son asíncronos por dentro: esperan a `act()` para vaciar los efectos. Llamarlos sin `await` hace fallar todas las aserciones con `render function has not been called`, un mensaje que no apunta a la causa. El callback de cada `it()` que renderice va marcado `async` y cada `render` y `fireEvent` va precedido de `await`. Esto vale también para `renderHook`, que envuelve a `render`: verificar y esperar igual. Las aserciones no cambian.
 - **Node**: Expo 57 recomienda Node 20 o 22 LTS. La máquina tiene Node 24. Si un comando de Expo falla de forma inexplicable, ése es el primer sospechoso; la solución es instalar Node 22 LTS, no pelearse con el error.
 - **Sin Docker**: no hay Supabase local. Las migraciones se aplican al proyecto en la nube con `supabase db push` y las pruebas de RLS son de integración contra ese proyecto.
 
@@ -293,6 +294,7 @@ export const colors = {
   redTint: '#FFE5E3',
   amberText: '#9A5400',
   amberTint: '#FFF0D9',
+  chevron: '#C4C4C6',
 } as const;
 
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const;
@@ -382,38 +384,38 @@ import { StatusPill } from './StatusPill';
 import { colors } from './tokens';
 
 describe('StatusPill', () => {
-  it('muestra los días restantes en plural', () => {
-    render(<StatusPill daysLeft={5} />);
+  it('muestra los días restantes en plural', async () => {
+    await render(<StatusPill daysLeft={5} />);
     expect(screen.getByText('5 giorni')).toBeOnTheScreen();
   });
 
-  it('muestra el singular con un día', () => {
-    render(<StatusPill daysLeft={1} />);
+  it('muestra el singular con un día', async () => {
+    await render(<StatusPill daysLeft={1} />);
     expect(screen.getByText('1 giorno')).toBeOnTheScreen();
   });
 
-  it('dice oggi cuando vence hoy', () => {
-    render(<StatusPill daysLeft={0} />);
+  it('dice oggi cuando vence hoy', async () => {
+    await render(<StatusPill daysLeft={0} />);
     expect(screen.getByText('oggi')).toBeOnTheScreen();
   });
 
-  it('cuenta hacia atrás cuando ya venció', () => {
-    render(<StatusPill daysLeft={-3} />);
+  it('cuenta hacia atrás cuando ya venció', async () => {
+    await render(<StatusPill daysLeft={-3} />);
     expect(screen.getByText('3 gg fa')).toBeOnTheScreen();
   });
 
-  it('usa el rojo cuando está vencido', () => {
-    render(<StatusPill daysLeft={-1} />);
+  it('usa el rojo cuando está vencido', async () => {
+    await render(<StatusPill daysLeft={-1} />);
     expect(screen.getByTestId('status-pill')).toHaveStyle({ backgroundColor: colors.redTint });
   });
 
-  it('usa el ámbar dentro del umbral', () => {
-    render(<StatusPill daysLeft={4} thresholdDays={7} />);
+  it('usa el ámbar dentro del umbral', async () => {
+    await render(<StatusPill daysLeft={4} thresholdDays={7} />);
     expect(screen.getByTestId('status-pill')).toHaveStyle({ backgroundColor: colors.amberTint });
   });
 
-  it('usa el gris fuera del umbral: lo que está bien no lleva color', () => {
-    render(<StatusPill daysLeft={30} thresholdDays={7} />);
+  it('usa el gris fuera del umbral: lo que está bien no lleva color', async () => {
+    await render(<StatusPill daysLeft={30} thresholdDays={7} />);
     expect(screen.getByTestId('status-pill')).toHaveStyle({ backgroundColor: colors.fill });
   });
 });
@@ -508,22 +510,22 @@ import { Button } from './Button';
 import { HIT_SIZE } from './tokens';
 
 describe('Button', () => {
-  it('llama a onPress al tocarlo', () => {
+  it('llama a onPress al tocarlo', async () => {
     const onPress = jest.fn();
-    render(<Button title="Salva" onPress={onPress} />);
-    fireEvent.press(screen.getByRole('button', { name: 'Salva' }));
+    await render(<Button title="Salva" onPress={onPress} />);
+    await fireEvent.press(screen.getByRole('button', { name: 'Salva' }));
     expect(onPress).toHaveBeenCalledTimes(1);
   });
 
-  it('no llama a onPress cuando está deshabilitado', () => {
+  it('no llama a onPress cuando está deshabilitado', async () => {
     const onPress = jest.fn();
-    render(<Button title="Salva" onPress={onPress} disabled />);
-    fireEvent.press(screen.getByRole('button', { name: 'Salva' }));
+    await render(<Button title="Salva" onPress={onPress} disabled />);
+    await fireEvent.press(screen.getByRole('button', { name: 'Salva' }));
     expect(onPress).not.toHaveBeenCalled();
   });
 
-  it('respeta la altura mínima táctil', () => {
-    render(<Button title="Salva" onPress={() => {}} />);
+  it('respeta la altura mínima táctil', async () => {
+    await render(<Button title="Salva" onPress={() => {}} />);
     expect(screen.getByRole('button', { name: 'Salva' })).toHaveStyle({ minHeight: HIT_SIZE });
   });
 });
@@ -701,7 +703,7 @@ function Chevron() {
         height: 13,
         borderRightWidth: 2,
         borderTopWidth: 2,
-        borderColor: '#C4C4C6',
+        borderColor: colors.chevron,
         transform: [{ rotate: '45deg' }],
       }}
     />
@@ -716,9 +718,9 @@ import { TextInput, View, type TextInputProps } from 'react-native';
 import { Text } from './Text';
 import { colors, space, HIT_SIZE } from './tokens';
 
-type Props = TextInputProps & { label: string; error?: string };
+type Props = TextInputProps & { label: string };
 
-export function Field({ label, error, style, ...rest }: Props) {
+export function Field({ label, style, ...rest }: Props) {
   return (
     <View
       style={{
@@ -738,7 +740,7 @@ export function Field({ label, error, style, ...rest }: Props) {
         placeholderTextColor={colors.textTertiary}
         {...rest}
         style={[
-          { flex: 1, fontSize: 17, color: error ? colors.redText : colors.text, paddingVertical: 12 },
+          { flex: 1, fontSize: 17, color: colors.text, paddingVertical: 12 },
           style,
         ]}
       />
@@ -1777,7 +1779,7 @@ export default function AccediScreen() {
         {t.auth.signInTitle}
       </Text>
 
-      <ListGroup footer={error ?? undefined}>
+      <ListGroup>
         <Field
           label={t.auth.email}
           value={email}
