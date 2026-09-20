@@ -1,10 +1,14 @@
 """GET/POST /products, GET/PATCH /products/{id}: catalog listing, search,
-creation, the barcode_taken/barcode_locked 409 shapes, and the v2-15
-asymmetry (operatore POST -> 403, operatore PATCH -> 404).
+creation, the barcode_taken/barcode_locked 409 shapes, the v2-15 asymmetry
+(operatore POST -> 403, operatore PATCH -> 404), and that an explicit null
+on a required column is rejected as 422, never reaches Postgres as a 500.
 """
 import uuid
 
+import psycopg
+
 from app.db import as_owner
+from app.main import app
 
 
 async def _login(client, email: str, password: str):
@@ -204,3 +208,48 @@ async def test_barcode_change_blocked_when_lot_exists(client, business):
         assert result.rowcount == 1
         result = await conn.execute("delete from products where id = %s", (product_id,))
         assert result.rowcount == 1
+
+
+# -------------------------------------------------------- explicit nulls
+
+async def test_patch_null_on_required_column_is_422(client, business):
+    token = await _access_token(client, business.titolare_email, business.password)
+    create_resp = await _create_product(client, token, name="Farina 00")
+    product_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/products/{product_id}", headers=_auth(token), json={"unit": None}
+    )
+    assert resp.status_code == 422, resp.text
+    # pydantic's own shape here, not the machine-code string the rest of
+    # this router's errors use - ProductPatch's model validator rejects
+    # this before the request ever reaches SQL.
+    assert isinstance(resp.json()["detail"], list)
+
+
+async def test_patch_null_on_nullable_column_clears_it(client, business):
+    token = await _access_token(client, business.titolare_email, business.password)
+    create_resp = await _create_product(client, token, name="Farina 00", brand="Barilla")
+    product_id = create_resp.json()["id"]
+    assert create_resp.json()["brand"] == "Barilla"
+
+    resp = await client.patch(
+        f"/products/{product_id}", headers=_auth(token), json={"brand": None}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["brand"] is None
+
+
+async def test_not_null_violation_maps_to_422():
+    # A router-agnostic check of main.py's own error map, not a route: no
+    # current input to any endpoint in this codebase can actually get an
+    # explicit null past its Pydantic model onto a NOT NULL column (see the
+    # module docstring), so there is no live HTTP path left to provoke a
+    # genuine psycopg.errors.NotNullViolation from client input - this
+    # calls the registered handler directly instead, the same object
+    # main.py's @app.exception_handler(...) decorator put in
+    # app.exception_handlers.
+    handler = app.exception_handlers[psycopg.errors.NotNullViolation]
+    response = await handler(None, psycopg.errors.NotNullViolation("column x"))
+    assert response.status_code == 422
+    assert response.body == b'{"detail":"invalid"}'

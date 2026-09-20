@@ -54,6 +54,14 @@ async def check_violation_handler(request: Request, exc: psycopg.errors.CheckVio
     return JSONResponse(status_code=422, content={"detail": "invalid"})
 
 
+@app.exception_handler(psycopg.errors.NotNullViolation)
+async def not_null_violation_handler(request: Request, exc: psycopg.errors.NotNullViolation):
+    # Safety net for every router, not just products: a request that
+    # somehow gets an explicit null past its own Pydantic model onto a NOT
+    # NULL column (23502) should still 422, never surface as a bare 500.
+    return JSONResponse(status_code=422, content={"detail": "invalid"})
+
+
 app.include_router(auth_router)
 app.include_router(invitations_router)
 app.include_router(users_router)

@@ -66,7 +66,7 @@ from datetime import datetime
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..db import as_user
 from ..security import CurrentUser, require_user
@@ -88,6 +88,15 @@ _PATCH_COLUMNS = (
     "name", "barcode", "brand", "unit", "storage",
     "min_stock", "has_expiry", "category_id", "active",
 )
+
+# Of _PATCH_COLUMNS, these are NOT NULL in the products table (barcode,
+# brand and category_id are the only nullable ones - clearing them to null
+# is a legitimate patch). ProductPatch's model validator below rejects an
+# explicit null on any of these before the request ever reaches SQL, so a
+# client sending {"unit": null} gets pydantic's 422, not a 500 from
+# Postgres's own NOT NULL constraint (main.py's NotNullViolation handler is
+# the remaining safety net, for whatever this list ever misses).
+_REQUIRED_PATCH_COLUMNS = ("name", "unit", "storage", "min_stock", "has_expiry", "active")
 
 
 def _strip(value: object) -> object:
@@ -141,6 +150,10 @@ class ProductIn(BaseModel):
 
 
 class ProductPatch(BaseModel):
+    """All fields optional (only those actually sent end up in the SET
+    list - see update_product's use of model_dump(exclude_unset=True)),
+    except that a field in _REQUIRED_PATCH_COLUMNS may not be *sent* as
+    null: see _reject_null_on_required_columns below."""
     name: str | None = Field(default=None, min_length=1, max_length=200)
     barcode: str | None = Field(default=None, max_length=64)
     brand: str | None = Field(default=None, max_length=120)
@@ -153,6 +166,17 @@ class ProductPatch(BaseModel):
 
     _strip_name = field_validator("name", mode="before")(_strip)
     _normalize_barcode_v = field_validator("barcode", mode="before")(_normalize_barcode)
+
+    @model_validator(mode="after")
+    def _reject_null_on_required_columns(self) -> "ProductPatch":
+        # model_fields_set (not "is the value None") is what tells "sent as
+        # null" apart from "not sent at all" - both resolve to the same
+        # Python None on an Optional field, but only the former should ever
+        # be rejected here.
+        for column in _REQUIRED_PATCH_COLUMNS:
+            if column in self.model_fields_set and getattr(self, column) is None:
+                raise ValueError(f"{column} cannot be null")
+        return self
 
 
 def _product_out(row) -> ProductOut:
