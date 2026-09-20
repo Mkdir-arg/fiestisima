@@ -10,6 +10,7 @@ from .db import pool, as_owner
 from .routers.auth import router as auth_router
 from .routers.businesses import router as businesses_router
 from .routers.invitations import router as invitations_router
+from .routers.products import router as products_router
 from .routers.users import router as users_router
 
 
@@ -57,6 +58,7 @@ app.include_router(auth_router)
 app.include_router(invitations_router)
 app.include_router(users_router)
 app.include_router(businesses_router)
+app.include_router(products_router)
 
 
 @app.get("/health")
