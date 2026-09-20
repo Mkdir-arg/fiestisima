@@ -21,6 +21,8 @@
 - **Python 3.12** en producción (Dockerfile). Local hay 3.14: `uv` con `requires-python = ">=3.12"`.
 - **Conexión a la base durante el bloque**: `postgresql://fiestisima:<PGPASSWORD>@iriguchi.proxy.rlwy.net:14064/fiestisima` (proxy TCP de `fiestisima-db`). La contraseña se lee con `railway variables --service fiestisima-db ... --json`, nunca se escribe en un archivo commiteado. Al cerrar el bloque el proxy se elimina.
 - **Node 24 / Expo 57** como en v1.
+- **Mapa de errores de Postgres → HTTP** (de la revisión de la Task 1): 42501 `InsufficientPrivilege` (RLS with-check y el trigger) → 403; 23505 `UniqueViolation` → 409; 23503 `ForeignKeyViolation` (restrict) → 409; 23514 `CheckViolation` → 422. **Un UPDATE cuya fila no pasa el USING no da error: `rowcount` 0** → el router devuelve 404. Nunca SQL por f-string: `set local role` es reversible con `reset role` dentro de la misma transacción, así que una sola inyección tumba el modelo entero.
+- **`app_user` no tiene DELETE** salvo en `invitations` y `categories` (migración 0004). Los routers no exponen borrado de nada más; se desactiva.
 
 ---
 
@@ -299,15 +301,16 @@ Run: `uv run pytest -q` → verde.
 
 ## Task 4: Invitaciones, usuarios, negocio, mailer, y la suite de permisos traducida
 
-**Files:** `api/app/mail.py`, `api/app/routers/{invitations,users,businesses}.py`, `api/tests/{test_invitations,test_users,test_rls_matrix}.py`.
+**Files:** `api/app/mail.py`, `api/app/routers/{invitations,users,businesses}.py`, `api/migrations/0005_business_users_view.sql`, `api/tests/{test_invitations,test_users,test_rls_matrix}.py`.
 
 **Interfaces:** Produces: `Mailer.send(to, subject, text)`; endpoints de la spec §5 para invitaciones/usuarios/negocio.
 
 - [ ] `mail.py`: `ConsoleMailer` (logging.info del cuerpo) y `ResendMailer` (POST `https://api.resend.com/emails` con httpx). `get_mailer()` elige por `settings.resend_api_key`.
 - [ ] `routers/invitations.py`: `POST /invitations` (`as_user`; la RLS ya limita a titolare); `GET /invitations/{token}` (owner, sólo lectura de `full_name`, `business.name`, `expires_at`; 404 si aceptada/expirada); `POST /invitations/{token}/accept {full_name,password}` — `-- runs as owner:` creates users + profiles atomically; 410 si expirada; marca `accepted_at`.
-- [ ] `routers/users.py`: `GET /users`, `PATCH /users/{id} {role?,active?}` con `as_user`. La RLS y el disparador deciden; 42501 → 403. Regla del último titolare: **en la API**, con comentario explicando que es la única regla de permisos fuera de la base y por qué (necesita un conteo).
+- [ ] `migrations/0005_business_users_view.sql`: `app_user` no puede leer `users` (ahí vive `password_hash`), pero `GET /users` necesita los emails. Vista `business_users` con `security_barrier`, dueña del owner, `profiles ⋈ users` proyectando `id, email, full_name, role, active, last_seen_at`, filtrada por `business_id = app_business_id()`; `grant select on business_users to app_user`. Mismo patrón que `lots_view`. **No** un cuarto camino como dueño. Test de privilegios: `app_user` sigue sin SELECT sobre `users`.
+- [ ] `routers/users.py`: `GET /users` (lee `business_users`), `PATCH /users/{id} {role?,active?}` con `as_user`. La RLS y el disparador deciden; 42501 → 403. Regla del último titolare: **en la API**, con comentario explicando que es la única regla de permisos fuera de la base y por qué (necesita un conteo).
 - [ ] `routers/businesses.py`: `GET /businesses/me`, `PATCH /businesses/me`.
-- [ ] `test_rls_matrix.py`: traducir las invariantes del ledger v1 — cross-tenant FK rechazada; operatore no ve `unit_price` ni `document_url` vía `lots_view` y no puede `select unit_price` de `lots`; operatore no crea producto ni invita; nadie hace update/delete en `movements` (fila intacta tras el intento); `client_id` idempotente; `scarto_needs_reason`; `nulls not distinct` con NULLs; dos productos sin barcode; `lot_stock` = 0 sin movimientos; los cuatro casos de signo de anulación; `set null (col)` deja `business_id` intacto; borrar evento con movimientos falla; usuario desactivado → `app_business_id()` NULL y cero filas; operatore no se autoasciende (trigger → 42501), titolare degrada a responsabile; titolare corrige `lot_code` pero no `created_by`; `received_on` fecha de Roma; `occurred_at` retro-datado se conserva. Todo por `as_user(...)`.
+- [ ] `test_rls_matrix.py`: traducir las invariantes del ledger v1 — cross-tenant FK rechazada; operatore no ve `unit_price` ni `document_url` vía `lots_view` y no puede `select unit_price` de `lots`; operatore no crea producto ni invita; nadie hace update/delete en `movements` (fila intacta tras el intento); `client_id` idempotente; `scarto_needs_reason`; `nulls not distinct` con NULLs; dos productos sin barcode; `lot_stock` = 0 sin movimientos; los cuatro casos de signo de anulación; `set null (col)` deja `business_id` intacto; borrar un evento como app_user es 42501 (no hay privilegio DELETE; la FK restrict queda como segunda barrera para el dueño); usuario desactivado → `app_business_id()` NULL y cero filas; operatore no se autoasciende (trigger → 42501), titolare degrada a responsabile; titolare corrige `lot_code` pero no `created_by`; `received_on` fecha de Roma; `occurred_at` retro-datado se conserva. Todo por `as_user(...)`.
 - [ ] `test_invitations.py`, `test_users.py`: ciclo completo invito → aceptar → login; operatore no puede invitar (403); último titolare no puede degradarse (409).
 - [ ] Commit `feat(api): invitations, users, business and the permission suite`.
 
