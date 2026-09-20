@@ -59,10 +59,14 @@ export function useSession() {
     // from a caller nulling it out — drop the cached profile too. Without
     // this, a stale `['me']` entry can keep answering `meQuery.data` after
     // sign-out/deactivation until something else happens to refetch it.
-    if (session === null) {
+    // Gated on `checked`: `session` also starts out null before the initial
+    // `loadTokens()` resolves, and without this guard that first render
+    // would evict a live `['me']` entry too (harmless with a single
+    // instance of this hook, but not if a second one ever mounted).
+    if (checked && session === null) {
       queryClient.removeQueries({ queryKey: ['me'] });
     }
-  }, [session, queryClient]);
+  }, [checked, session, queryClient]);
 
   const refresh = useCallback(async () => {
     setDeactivated(false);

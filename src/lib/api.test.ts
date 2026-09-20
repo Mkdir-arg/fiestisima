@@ -91,20 +91,28 @@ describe('api', () => {
   });
 
   it('does not start a second refresh when another request already rotated the tokens', async () => {
-    // Simulates the real race: two requests read the same (soon-to-be-stale)
-    // pair; A's 401 arrives first and refreshes; B's 401 for its OWN request
-    // (made with the same original token) only arrives after the rotation
-    // has already happened. B must retry with the rotated token instead of
-    // calling /auth/refresh again with its now-stale refresh token.
+    // Simulates the real-world window the guard exists for: A's 401
+    // arrives, refreshes, and its ENTIRE retry completes — at which point
+    // `refreshInFlight` has already been reset to null by `.finally`. Only
+    // THEN does B's 401 (for its own request, made with the same original,
+    // now-stale token) arrive. Without the guard, B would find no
+    // in-flight refresh to piggyback on and would kick off a brand new one
+    // with its own now-stale refresh token.
+    //
+    // Gating B's 401 merely on `setTokens` having been called (as an
+    // earlier version of this test did) is NOT equivalent: at that point
+    // `refreshInFlight` is still set, so B would piggyback on it via the
+    // dedup path regardless of this guard, and deleting the guard would
+    // not turn this test red. Gating on A's whole `api.get('/a')` having
+    // resolved (its retry included) is what actually exercises the guard.
     let stored = { access: 'stale', refresh: 'ref-1' };
-    let markRotated!: () => void;
-    const rotated = new Promise<void>((resolve) => {
-      markRotated = resolve;
+    let markASettled!: () => void;
+    const aSettled = new Promise<void>((resolve) => {
+      markASettled = resolve;
     });
     mockedTokenStorage.getTokens.mockImplementation(() => Promise.resolve(stored));
     mockedTokenStorage.setTokens.mockImplementation((pair: { access: string; refresh: string }) => {
       stored = pair;
-      markRotated();
       return Promise.resolve();
     });
 
@@ -118,14 +126,19 @@ describe('api', () => {
       const count = (callsPerPath.get(url) ?? 0) + 1;
       callsPerPath.set(url, count);
       if (url.endsWith('/b') && count === 1) {
-        return rotated.then(() => jsonResponse(401, { detail: 'invalid_token' }));
+        return aSettled.then(() => jsonResponse(401, { detail: 'invalid_token' }));
       }
       return Promise.resolve(
         count === 1 ? jsonResponse(401, { detail: 'invalid_token' }) : jsonResponse(200, { ok: true }),
       );
     });
 
-    await Promise.all([api.get('/a'), api.get('/b')]);
+    const a = api.get('/a').then((r) => {
+      markASettled();
+      return r;
+    });
+    const b = api.get('/b');
+    await Promise.all([a, b]);
 
     expect(refreshCalls).toBe(1);
     const bRetryCall = (global.fetch as jest.Mock).mock.calls.find(
