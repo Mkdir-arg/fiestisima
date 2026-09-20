@@ -50,8 +50,11 @@ create table invitations (
   -- on the parent, so a row can only point at a parent row from the same
   -- business. Composite foreign keys default to MATCH SIMPLE, which skips
   -- the check when the referencing column is null - exactly what is wanted
-  -- for these optional references.
-  foreign key (invited_by, business_id) references profiles (id, business_id) on delete set null
+  -- for these optional references. Where the action is "on delete set
+  -- null", the column list after it names only the child column: without
+  -- it Postgres nulls every column of the key, including business_id,
+  -- which is not null and would make the delete fail instead.
+  foreign key (invited_by, business_id) references profiles (id, business_id) on delete set null (invited_by)
 );
 -- Only one pending invitation per email and business.
 create unique index invitations_pending_idx
@@ -103,8 +106,8 @@ create table products (
   -- collides.
   unique (business_id, barcode),
   unique (id, business_id),
-  foreign key (category_id, business_id) references categories (id, business_id) on delete set null,
-  foreign key (updated_by, business_id) references profiles (id, business_id) on delete set null
+  foreign key (category_id, business_id) references categories (id, business_id) on delete set null (category_id),
+  foreign key (updated_by, business_id) references profiles (id, business_id) on delete set null (updated_by)
 );
 create index products_business_active_idx on products (business_id, active);
 
@@ -132,19 +135,29 @@ create table lots (
   expires_on date,
   unit_price numeric check (unit_price >= 0),
   document_url text,
-  received_on date not null default current_date,
-  created_by uuid,
+  -- The venue is in Italy; the default has to reflect the day on the wall
+  -- clock in Rome, not UTC's, or anything entered between midnight and the
+  -- CET/CEST offset gets stamped with the previous day in a date-keyed
+  -- register that gets read against paper documents. Hardcoded until the
+  -- business gains its own timezone column.
+  received_on date not null default (now() at time zone 'Europe/Rome')::date,
+  -- Never nulled: who received the goods is part of what an inspector
+  -- asks. Profiles are deactivated, not deleted, so this can stay not
+  -- null with an on delete restrict and still never block a real delete.
+  created_by uuid not null,
   created_at timestamptz not null default now(),
-  -- Two identical goods-in entries do not create two lots. NULLS NOT
+  -- Two identical `carico` entries do not create two lots. NULLS NOT
   -- DISTINCT makes a lot with no date or no supplier collide with itself
   -- too.
   unique nulls not distinct (business_id, product_id, lot_code, expires_on, supplier_id),
   unique (id, business_id),
   foreign key (product_id, business_id) references products (id, business_id) on delete restrict,
   foreign key (supplier_id, business_id) references suppliers (id, business_id) on delete restrict,
-  foreign key (created_by, business_id) references profiles (id, business_id) on delete set null
+  foreign key (created_by, business_id) references profiles (id, business_id) on delete restrict
 );
-create index lots_product_idx on lots (product_id);
+-- Serves the app's most common lookup: lots of a product in this business,
+-- soonest expiry first (FEFO). Subsumes a plain (product_id) index.
+create index lots_product_idx on lots (business_id, product_id, expires_on);
 create index lots_expiry_idx on lots (business_id, expires_on);
 
 create table movements (
@@ -155,21 +168,34 @@ create table movements (
   type movement_type not null,
   quantity numeric not null check (quantity > 0),
   reason text,
+  -- A reversal repeats the same type as the row it reverses (a reversed
+  -- carico is still type carico) and only sets reverses_id to say so.
+  -- lot_stock reads the pair from that, not from a signed quantity.
   reverses_id uuid,
   -- Idempotency for the offline queue: a retry does not duplicate the
   -- movement.
   client_id uuid unique,
-  created_by uuid,
+  -- Never nulled: who recorded the movement is part of what an inspector
+  -- asks. Profiles are deactivated, not deleted.
+  created_by uuid not null,
+  -- occurred_at is when the movement actually happened on the floor;
+  -- movements are queued offline (see client_id) and can sync hours or
+  -- days later, so this is the legally relevant date, distinct from
+  -- created_at below, which is only the sync/insert timestamp.
+  occurred_at timestamptz not null default now(),
   created_at timestamptz not null default now(),
   constraint scarto_needs_reason check (type <> 'scarto' or reason is not null),
   unique (id, business_id),
   foreign key (lot_id, business_id) references lots (id, business_id) on delete restrict,
-  foreign key (event_id, business_id) references events (id, business_id) on delete set null,
-  foreign key (reverses_id, business_id) references movements (id, business_id) on delete set null,
-  foreign key (created_by, business_id) references profiles (id, business_id) on delete set null
+  -- Restrict, not set null: which event consumed the goods is part of the
+  -- traceability record. Events are concluded, not deleted, once they
+  -- have movements against them.
+  foreign key (event_id, business_id) references events (id, business_id) on delete restrict,
+  foreign key (reverses_id, business_id) references movements (id, business_id) on delete set null (reverses_id),
+  foreign key (created_by, business_id) references profiles (id, business_id) on delete restrict
 );
 create index movements_lot_idx on movements (lot_id);
-create index movements_business_date_idx on movements (business_id, created_at desc);
+create index movements_business_date_idx on movements (business_id, occurred_at desc);
 create index movements_event_idx on movements (event_id) where event_id is not null;
 
 -- ---------------------------------------------------------------- functions
@@ -201,13 +227,30 @@ $$;
 -- Stock is not stored: it is computed. That way it never drifts out of
 -- sync with the record.
 
-create view lot_stock as
+-- security_barrier on all three views below: they are deliberately not
+-- security_invoker, so their own "where business_id = auth_business_id()"
+-- is the entire tenant boundary. Without security_barrier the planner may
+-- push a caller-supplied predicate ahead of that filter, and a cheap
+-- predicate that errors on the wrong input (or times differently) can leak
+-- whether another tenant's row matched it. security_barrier forces the
+-- view's own qualifications to run first.
+create view lot_stock with (security_barrier = true) as
 select
   l.id as lot_id,
   l.business_id,
   l.product_id,
   coalesce(
-    sum(case when m.type = 'carico' then m.quantity else -m.quantity end),
+    sum(
+      -- A reversal carries the same type as the row it reverses (see the
+      -- comment on movements.reverses_id), so the sign cannot come from
+      -- type alone: it comes from whether type and "is a reversal" agree.
+      -- Plain carico: true <> false = true, add. Reversed carico:
+      -- true <> true = false, subtract (undoes the addition). Plain
+      -- scarico/scarto: false <> false = false, subtract. Reversed
+      -- scarico/scarto: false <> true = true, add back.
+      case when (m.type = 'carico') <> (m.reverses_id is not null)
+           then m.quantity else -m.quantity end
+    ),
     0
   ) as stock
 from lots l
@@ -215,15 +258,20 @@ left join movements m on m.lot_id = l.id
 where l.business_id = auth_business_id()
 group by l.id, l.business_id, l.product_id;
 
-create view product_stock as
+create view product_stock with (security_barrier = true) as
 select business_id, product_id, sum(stock) as stock
 from lot_stock
 group by business_id, product_id;
 
 -- The price is not hidden on the client: it never leaves the database for
 -- an operatore. That is why direct access to lots is revoked and it is
--- read through this view instead.
-create view lots_view as
+-- read through this view instead. document_url gets the same guard: it
+-- points at the supplier's scanned document, which is often a fattura
+-- carrying the same unit prices this view otherwise withholds. The
+-- storage bucket behind that URL needs its own authorization check
+-- (configured in a later task) - a view cannot protect an object the
+-- client fetches directly from storage.
+create view lots_view with (security_barrier = true) as
 select
   l.id,
   l.business_id,
@@ -231,7 +279,7 @@ select
   l.supplier_id,
   l.lot_code,
   l.expires_on,
-  l.document_url,
+  case when auth_role() in ('titolare', 'responsabile') then l.document_url end as document_url,
   l.received_on,
   l.created_by,
   l.created_at,
