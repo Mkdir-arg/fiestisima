@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - **Idiomas**: código y commits en inglés; documentación en español; textos de interfaz en italiano, centralizados en `src/i18n/it.ts` desde el primer día. Ningún string italiano hardcodeado en un componente.
+  - "Código en inglés" **incluye los comentarios**, también los de los archivos `.sql`. Varios bloques de código de este plan traen comentarios en español: son explicaciones para vos, no texto a copiar. Quien implemente los traduce al inglés al escribir el archivo, conservando lo que dicen.
 - **Commits**: Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`, `test:`).
 - **Migraciones**: numeradas `NNNN_descripcion.sql`. **Nunca se edita una migración ya aplicada**; los cambios van en una migración nueva.
 - **Tipos de la base**: generados con `npx supabase gen types typescript --linked`. Prohibido escribir a mano un tipo que la base ya define.
