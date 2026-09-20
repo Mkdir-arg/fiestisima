@@ -37,4 +37,12 @@ describe('daysUntil', () => {
   it('devuelve cero el mismo día', () => {
     expect(daysUntil('2026-09-20', today)).toBe(0);
   });
+
+  it('lanza un error si la fecha viene mal formada', () => {
+    expect(() => daysUntil('12/03/2027', today)).toThrow();
+  });
+
+  it('lanza un error si a la fecha le faltan segmentos', () => {
+    expect(() => daysUntil('2027-03', today)).toThrow();
+  });
 });
