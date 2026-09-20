@@ -6,3 +6,11 @@ web-build/
 .env
 .env.local
 .DS_Store
+.superpowers/
+
+# Expo / native generated
+expo-env.d.ts
+*.tsbuildinfo
+.metro-health-check*
+/ios
+/android
