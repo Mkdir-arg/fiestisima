@@ -1,17 +1,23 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { Redirect } from 'expo-router';
+import { ActivityIndicator, View } from 'react-native';
+import { useSessionContext } from '@/src/features/auth/SessionProvider';
+import { colors } from '@/src/ui/tokens';
 
 export default function Index() {
-  return (
-    <View style={styles.container}>
-      <Text>Fiestisima</Text>
-    </View>
-  );
-}
+  const { session, profile, isLoading } = useSessionContext();
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+  if (isLoading) {
+    return (
+      <View
+        style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background }}
+      >
+        <ActivityIndicator color={colors.blue} />
+      </View>
+    );
+  }
+
+  if (session && profile) {
+    return <Redirect href="/(app)/(tabs)/prodotti" />;
+  }
+  return <Redirect href="/(auth)/accedi" />;
+}

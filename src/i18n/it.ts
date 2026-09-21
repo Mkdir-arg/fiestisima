@@ -23,6 +23,18 @@ export const t = {
     invalidToken: 'Il link non è valido o è scaduto.',
     offline: 'Nessuna connessione. Riprova quando torni online.',
   },
+  nav: {
+    prodotti: 'Prodotti',
+    scadenze: 'Scadenze',
+    scansiona: 'Scansiona',
+    altro: 'Altro',
+    registro: 'Registro',
+    fornitori: 'Fornitori',
+    utenti: 'Utenti',
+    impostazioni: 'Impostazioni',
+    signOut: 'Esci',
+    comingSoon: 'Arriva con il Blocco A.',
+  },
   invite: {
     title: 'Completa la registrazione',
     fullName: 'Nome e cognome',
@@ -49,5 +61,10 @@ export const t = {
   errors: {
     generic: 'Qualcosa non ha funzionato. Riprova.',
     onlyTitolare: 'Solo il titolare può gestire gli utenti.',
+    // A write the user attempted came back 403 or 404 — per the API contract
+    // (ruling v2-15) RLS-filtered writes can answer either way, and the UI
+    // never distinguishes "forbidden" from "not found" for an action it
+    // already tried to hide.
+    notPermitted: 'Non hai il permesso per questa azione.',
   },
 } as const;
