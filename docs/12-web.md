@@ -1,7 +1,7 @@
 # 12 · Web
 
 ## Objetivo
-La web es la **entrega principal**, no la secundaria, mientras no exista una cuenta de Apple Developer: sin ella no hay build nativo, ni TestFlight, ni App Store (ver doc 14). Que la dueña pueda trabajar desde la computadora del negocio y que cualquier dispositivo con navegador pueda consultar. Mismo código que la futura app nativa (Expo Router), misma base. Instalada desde Safari con "Añadir a pantalla de inicio" se comporta como una app — ícono propio, pantalla completa — y desde iOS 16.4 acepta notificaciones push.
+Que la dueña pueda trabajar desde la computadora del negocio y que cualquier dispositivo con navegador pueda consultar. Mismo código que la app (Expo Web), misma base.
 
 ## Qué tiene la web
 - Login (sin Face ID; el navegador recuerda la sesión).
@@ -10,13 +10,11 @@ La web es la **entrega principal**, no la secundaria, mientras no exista una cue
 - Todo el ABM con tablas más amplias que en el teléfono (más columnas, ordenamiento por columna, paginación).
 
 ## Diferencias con la app
-La columna "App iOS" describe la app nativa una vez exista cuenta de Apple Developer (ver doc 14); hoy sólo existe la web.
-
-| | App iOS (futura) | Web |
+| | App iOS | Web |
 |---|---|---|
-| Escaneo con cámara | ✓ (nativo, `expo-camera`) | ✓ (librería JS) + lector USB / entrada manual |
-| OCR | No entra en la primera entrega: requiere build nativo (ver doc 06) | — (imposible en navegador) |
-| Push | ✓ (nativo) | ✓ desde iOS 16.4, instalada a pantalla de inicio + resumen en dashboard |
+| Escaneo con cámara | ✓ | Solo lector USB / entrada manual |
+| OCR | ✓ | — |
+| Push | ✓ | Badge en el menú + resumen en dashboard |
 | Face ID | ✓ | — |
 | Exportes | ✓ (share sheet) | ✓ (descarga) |
 | Tablas amplias y reportes | básico | ✓ |

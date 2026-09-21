@@ -5,20 +5,4 @@ web-build/
 *.log
 .env
 .env.local
-.env.test
 .DS_Store
-.superpowers/
-
-# Expo / native generated
-expo-env.d.ts
-*.tsbuildinfo
-.metro-health-check*
-/ios
-/android
-
-# Python API
-api/.env
-api/.env.test
-api/.venv/
-__pycache__/
-.pytest_cache/

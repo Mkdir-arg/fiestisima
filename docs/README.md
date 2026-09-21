@@ -18,12 +18,7 @@ Especificación de qué hace el sistema y cómo debe comportarse. Es la fuente d
 | 12 | [Web](12-web.md) | Dashboard y diferencias con la app |
 | 13 | [Offline y sincronización](13-offline-y-sincronizacion.md) | Funcionamiento sin señal |
 | 14 | [Arquitectura técnica](14-arquitectura-tecnica.md) | Stack, estructura del repo, convenciones |
-| 15 | [Roadmap](15-roadmap.md) | Qué va en cada bloque |
-| 16 | [Eventi](16-eventi.md) | Modelo y flujo de eventos |
-| 17 | [Sistema visivo](17-sistema-visivo.md) | Componentes de `src/ui/`, tokens, convenciones visuales |
-
-## Specs y planes de cada bloque
-[`docs/superpowers/`](superpowers/) tiene las specs y los planes de implementación de cada bloque de trabajo (qué se decidió, por qué, y el detalle técnico que no entra en esta documentación funcional). Esta carpeta describe el comportamiento del sistema; `docs/superpowers/` describe cómo se construyó.
+| 15 | [Roadmap](15-roadmap.md) | Qué va en cada fase |
 
 ## Convenciones de esta documentación
 - La documentación está en español. Los textos de la interfaz (botones, etiquetas, mensajes) están en **italiano**, porque es el idioma de quien usa la app, y se escriben así: `Registra carico`.

@@ -37,7 +37,6 @@
 **Reglas**
 - No se puede descargar más de lo que tiene el lote. Si la cantidad supera el lote propuesto, la app ofrece repartir en los siguientes lotes FEFO (`Prendi 4 dal lotto 0817B e 2 dal lotto L2311C`).
 - Si el lote está vencido, se advierte en rojo: `Questo lotto è scaduto` con la opción de pasar a `Scarto`.
-- Un `scarico_uso` o `scarico_vendita` puede quedar asociado a un evento (`movements.event_id`), para saber qué mercadería se usó en cada fiesta. La columna existe desde la primera migración; la pantalla para elegirlo es del Bloque B y todavía no existe (ver doc 16).
 
 ## Scarto
 Igual que scarico pero:
@@ -47,7 +46,7 @@ Igual que scarico pero:
 
 ## Anulación
 - Todo movimiento puede anularse dentro de las 24 h por quien lo hizo, y en cualquier momento por titolare/responsabile.
-- Anular **no** crea un movimiento de tipo opuesto: crea otro movimiento del **mismo `type`** que el original (un carico anulado sigue siendo `carico`), con `reverses_id` apuntando a él — no lleva `reason = 'annullamento'`. El signo para el stock no sale del tipo solo: se decide comparando el tipo con si el movimiento es una reversión, así el stock neto queda bien y los informes pueden netear el original contra su anulación (ver doc 03). Ambos movimientos quedan visibles en el historial, el original tachado en la interfaz.
+- Anular crea el movimiento inverso con `reason = annullamento` y referencia al original. Ambos quedan visibles en el historial, el original tachado.
 
 ## Ficha del lote
 Se abre tocando un lote en la ficha del producto: código, scadenza, fornitore, fecha de recepción, quién lo cargó, documento adjunto, stock actual, línea de tiempo de movimientos.
@@ -55,12 +54,10 @@ Se abre tocando un lote en la ficha del producto: código, scadenza, fornitore, 
 ## Estados de un lote (derivados, no guardados)
 | Estado | Condición | Color |
 |---|---|---|
-| `OK` | stock > 0 y vence en más de 7 días | gris (sin color) |
+| `OK` | stock > 0 y vence en más de 7 días | verde |
 | `In scadenza` | stock > 0 y vence en ≤ 7 días | ámbar |
 | `Scaduto` | stock > 0 y `expires_on < hoy` | rojo |
 | `Esaurito` | stock = 0 | gris; se oculta de la lista por defecto |
-
-`OK` no lleva verde: si todo lo que está en orden es verde, el verde deja de significar algo y le compite al ámbar de `In scadenza`. Una fila sin color quiere decir "no te necesita nada" (ver doc 17).
 
 Los 7 días son configurables por negocio (`Impostazioni → Soglia di avviso`), con presets 3 / 7 / 14.
 
