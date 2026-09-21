@@ -3,7 +3,19 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 from .config import settings
 
-pool = AsyncConnectionPool(settings.database_url, open=False, min_size=1, max_size=10)
+# `check` is what makes a restarted database survivable: without it the
+# pool hands out a connection it still believes is good, the first query
+# on it raises OperationalError, and every request until the pool happens
+# to recycle that entry 500s. Seen for real after a fiestisima-db restart,
+# when /health kept failing on a dead pooled connection. check_connection
+# tests the connection on checkout and discards it if it is broken.
+pool = AsyncConnectionPool(
+    settings.database_url,
+    open=False,
+    min_size=1,
+    max_size=10,
+    check=AsyncConnectionPool.check_connection,
+)
 
 @asynccontextmanager
 async def as_user(user_id: UUID):

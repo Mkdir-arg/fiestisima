@@ -13,6 +13,11 @@ export const colors = {
   amberText: '#9A5400',
   amberTint: '#FFF0D9',
   chevron: '#C4C4C6',
+  // The tab bar sits on top of `background`, so it is a touch
+  // brighter than `surface` and its hairline a touch darker than
+  // `separator` - the same relationship iOS uses.
+  tabBar: '#FBFBFD',
+  tabBarBorder: '#D8D8DC',
 } as const;
 
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const;

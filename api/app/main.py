@@ -69,10 +69,26 @@ app.include_router(businesses_router)
 app.include_router(products_router)
 
 
+@app.exception_handler(psycopg.OperationalError)
+async def operational_error_handler(request: Request, exc: psycopg.OperationalError):
+    # The database is down, restarting, or refusing connections. That is
+    # not the caller's fault and it is worth retrying, so it is a 503 with
+    # a Retry-After, not the 500 a bare exception would produce.
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "database_unavailable"},
+        headers={"Retry-After": "5"},
+    )
+
+
 @app.get("/health")
 async def health():
     # Runs as owner: a health check has no caller identity to set as
     # app.user_id, and it only needs to prove the database is reachable.
+    # A dead pooled connection no longer reaches here (the pool checks on
+    # checkout); an unreachable database surfaces as 503 via the handler
+    # above, which is what Railway's healthcheck should see while the
+    # database is restarting.
     async with as_owner() as conn:
         await conn.execute("select 1")
     return {"ok": True}
