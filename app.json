@@ -22,7 +22,6 @@
       "favicon": "./assets/images/favicon.png",
       "lang": "it",
       "name": "Fiestisima",
-      "shortName": "Fiestisima",
       "themeColor": "#F2F2F7",
       "description": "Gestione magazzino ed eventi"
     },

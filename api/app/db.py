@@ -15,6 +15,10 @@ pool = AsyncConnectionPool(
     min_size=1,
     max_size=10,
     check=AsyncConnectionPool.check_connection,
+    # The default is 30s. A request that cannot get a connection should
+    # answer 503 while the phone is still holding the screen open, not
+    # half a minute later once the healthcheck has already given up.
+    timeout=8,
 )
 
 @asynccontextmanager

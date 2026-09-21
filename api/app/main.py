@@ -1,9 +1,11 @@
+import logging
 from contextlib import asynccontextmanager
 
 import psycopg
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from psycopg_pool import PoolTimeout
 
 from .config import settings
 from .db import pool, as_owner
@@ -12,6 +14,8 @@ from .routers.businesses import router as businesses_router
 from .routers.invitations import router as invitations_router
 from .routers.products import router as products_router
 from .routers.users import router as users_router
+
+logger = logging.getLogger("fiestisima")
 
 
 @asynccontextmanager
@@ -69,11 +73,33 @@ app.include_router(businesses_router)
 app.include_router(products_router)
 
 
+# Only these mean "the database is not reachable right now". Class 08 is
+# every connection exception; 57P01/02/03 are admin shutdown, crash
+# shutdown and cannot-connect-now. Everything else that happens to be an
+# OperationalError - a statement_timeout (57014), a deadlock (40P01), a
+# lock_timeout (55P03) - is a bug in a query, not an outage, and must stay
+# a loud 500 instead of hiding behind a retryable 503.
+_UNAVAILABLE_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
+
+
+def _is_unavailable(exc: psycopg.OperationalError) -> bool:
+    # PoolTimeout carries no sqlstate: the pool gave up before it ever
+    # reached the server, which is the outage case by definition.
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate is None:
+        return isinstance(exc, PoolTimeout)
+    return sqlstate.startswith("08") or sqlstate in _UNAVAILABLE_SQLSTATES
+
+
 @app.exception_handler(psycopg.OperationalError)
 async def operational_error_handler(request: Request, exc: psycopg.OperationalError):
-    # The database is down, restarting, or refusing connections. That is
-    # not the caller's fault and it is worth retrying, so it is a 503 with
-    # a Retry-After, not the 500 a bare exception would produce.
+    if not _is_unavailable(exc):
+        # Re-raised, not swallowed: ServerErrorMiddleware turns it into a
+        # 500 with a traceback, which is what a query bug deserves.
+        raise exc
+    # Logged rather than silently retried: an outage that lasts is
+    # something we want to find in the logs afterwards.
+    logger.error("database unavailable: %s", exc)
     return JSONResponse(
         status_code=503,
         content={"detail": "database_unavailable"},

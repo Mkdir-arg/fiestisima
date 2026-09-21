@@ -11,6 +11,9 @@ Run once per business:
 
 The password is generated and printed once; it is never stored in plain
 text and cannot be recovered afterwards (use the password-reset flow).
+Set BOOTSTRAP_PASSWORD to choose it instead - only worth doing from a
+script, since an environment variable is easier to leak than one line of
+terminal output.
 Re-running with an email that already exists fails instead of overwriting.
 """
 import asyncio, os, secrets, string, sys

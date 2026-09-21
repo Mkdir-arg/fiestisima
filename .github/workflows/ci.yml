@@ -57,6 +57,11 @@ jobs:
       - run: uv sync --frozen
       - name: Apply migrations
         run: uv run python scripts/migrate.py
-      - name: Apply migrations again (idempotence)
-        run: uv run python scripts/migrate.py
+      # Proves the runner skips what schema_migrations already records -
+      # not that the .sql files are re-runnable, which they are not meant
+      # to be (a second `create type` would fail).
+      - name: Apply migrations again (runner skips applied versions)
+        run: |
+          out=$(uv run python scripts/migrate.py)
+          test -z "$out" || { echo "expected no output, got: $out"; exit 1; }
       - run: uv run pytest -q
