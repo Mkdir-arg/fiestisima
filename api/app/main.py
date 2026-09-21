@@ -11,8 +11,13 @@ from .config import settings
 from .db import pool, as_owner
 from .routers.auth import router as auth_router
 from .routers.businesses import router as businesses_router
+from .routers.categories import router as categories_router
 from .routers.invitations import router as invitations_router
+from .routers.lots import router as lots_router
+from .routers.movements import router as movements_router
 from .routers.products import router as products_router
+from .routers.stock import router as stock_router
+from .routers.suppliers import router as suppliers_router
 from .routers.users import router as users_router
 
 logger = logging.getLogger("fiestisima")
@@ -71,6 +76,11 @@ app.include_router(invitations_router)
 app.include_router(users_router)
 app.include_router(businesses_router)
 app.include_router(products_router)
+app.include_router(categories_router)
+app.include_router(suppliers_router)
+app.include_router(lots_router)
+app.include_router(movements_router)
+app.include_router(stock_router)
 
 
 # Only these mean "the database is not reachable right now". Class 08 is

@@ -30,4 +30,4 @@ async def test_running_the_runner_twice_is_idempotent(db_url, owner):
 
     cur = await owner.execute("select version from schema_migrations order by version")
     rows = await cur.fetchall()
-    assert [r[0] for r in rows] == ["0001", "0002", "0003", "0004", "0005", "0006"]
+    assert [r[0] for r in rows] == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
