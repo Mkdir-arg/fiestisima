@@ -1,4 +1,4 @@
-import { render, screen, cleanup } from '@testing-library/react-native';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import ProdottiScreen from '@/app/(app)/(tabs)/prodotti';
 import { useProducts } from '@/src/features/products/queries';
@@ -41,7 +41,19 @@ describe('ProdottiScreen', () => {
 
     await renderScreen();
 
-    expect(screen.getByText('Nessun prodotto. Aggiungi il primo.')).toBeTruthy();
+    expect(screen.getByText('Nessun prodotto')).toBeTruthy();
+    expect(screen.getByText('Aggiungi il primo')).toBeTruthy();
+  });
+
+  it('shows the no-results state for a search with no matches', async () => {
+    mockedUseProducts.mockReturnValue({ data: [], isLoading: false, error: null });
+    mockedUseSessionContext.mockReturnValue({ profile: { role: 'titolare' } });
+
+    await renderScreen();
+    await fireEvent.changeText(screen.getByLabelText('Cerca'), 'zzz');
+
+    expect(screen.getByText('Nessun risultato')).toBeTruthy();
+    expect(screen.getByText('Nessun prodotto per "zzz".')).toBeTruthy();
   });
 
   it('renders product rows', async () => {
@@ -67,7 +79,9 @@ describe('ProdottiScreen', () => {
 
     await renderScreen();
 
-    expect(screen.queryByText('Nuovo prodotto')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Nuovo prodotto' })).toBeNull();
+    // The empty-state action is role-gated too: an operatore cannot create.
+    expect(screen.queryByText('Aggiungi il primo')).toBeNull();
   });
 
   it('shows "Nuovo prodotto" for a titolare', async () => {
@@ -76,6 +90,6 @@ describe('ProdottiScreen', () => {
 
     await renderScreen();
 
-    expect(screen.getByText('Nuovo prodotto')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Nuovo prodotto' })).toBeTruthy();
   });
 });

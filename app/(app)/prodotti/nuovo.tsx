@@ -7,6 +7,8 @@ import { ListGroup } from '@/src/ui/ListGroup';
 import { ListRow } from '@/src/ui/ListRow';
 import { Field } from '@/src/ui/Field';
 import { Button } from '@/src/ui/Button';
+import { SegmentedControl } from '@/src/ui/SegmentedControl';
+import { Sheet } from '@/src/ui/Sheet';
 import { useCreateProduct } from '@/src/features/products/mutations';
 import { productSchema, UNITS, STORAGES } from '@/src/features/products/schema';
 import { ApiError } from '@/src/lib/api';
@@ -36,6 +38,7 @@ export default function NuovoProdottoScreen() {
   const [storage, setStorage] = useState<(typeof STORAGES)[number]>('dispensa');
   const [minStock, setMinStock] = useState('0');
   const [error, setError] = useState<string | null>(null);
+  const [unitSheetOpen, setUnitSheetOpen] = useState(false);
 
   async function submit() {
     setError(null);
@@ -78,16 +81,19 @@ export default function NuovoProdottoScreen() {
       </ListGroup>
 
       <ListGroup header={t.products.unit}>
-        {UNITS.map((value) => (
-          <Chooser key={value} label={value} selected={unit === value} onPress={() => setUnit(value)} />
-        ))}
+        <ListRow title={unit} onPress={() => setUnitSheetOpen(true)} />
       </ListGroup>
 
-      <ListGroup header={t.products.storage}>
-        {STORAGES.map((value) => (
-          <Chooser key={value} label={value} selected={storage === value} onPress={() => setStorage(value)} />
-        ))}
-      </ListGroup>
+      <View style={{ marginBottom: space.xl }}>
+        <Text variant="headline" style={{ marginBottom: space.sm, marginLeft: space.xs }}>
+          {t.products.storage}
+        </Text>
+        <SegmentedControl
+          options={STORAGES.map((value) => ({ value, label: value }))}
+          value={storage}
+          onChange={setStorage}
+        />
+      </View>
 
       {error ? (
         <Text tone="red" variant="footnote" style={{ marginBottom: space.md }}>
@@ -97,6 +103,27 @@ export default function NuovoProdottoScreen() {
 
       <Button title={t.common.save} onPress={submit} loading={create.isPending} disabled={!name.trim()} />
       <View style={{ height: space.xxl }} />
+
+      <Sheet
+        visible={unitSheetOpen}
+        onClose={() => setUnitSheetOpen(false)}
+        closeLabel={t.common.close}
+        title={t.products.unit}
+      >
+        <ListGroup>
+          {UNITS.map((value) => (
+            <Chooser
+              key={value}
+              label={value}
+              selected={unit === value}
+              onPress={() => {
+                setUnit(value);
+                setUnitSheetOpen(false);
+              }}
+            />
+          ))}
+        </ListGroup>
+      </Sheet>
     </Screen>
   );
 }

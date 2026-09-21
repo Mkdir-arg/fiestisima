@@ -18,6 +18,9 @@ export const colors = {
   // `separator` - the same relationship iOS uses.
   tabBar: '#FBFBFD',
   tabBarBorder: '#D8D8DC',
+  // Backdrop behind a `Sheet`. Black rather than a token colour tinted,
+  // because it sits over arbitrary content and needs to darken it evenly.
+  overlay: 'rgba(0, 0, 0, 0.35)',
 } as const;
 
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const;

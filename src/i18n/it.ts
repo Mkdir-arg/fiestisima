@@ -5,6 +5,8 @@ export const t = {
     edit: 'Modifica',
     retry: 'Riprova',
     search: 'Cerca',
+    clearSearch: 'Cancella la ricerca',
+    close: 'Chiudi',
     days: 'giorni',
     daysAgo: 'gg fa',
     loading: 'Caricamento…',
@@ -29,6 +31,7 @@ export const t = {
     offline: 'Nessuna connessione. Riprova quando torni online.',
   },
   nav: {
+    oggi: 'Oggi',
     prodotti: 'Prodotti',
     scadenze: 'Scadenze',
     scansiona: 'Scansiona',
@@ -38,6 +41,7 @@ export const t = {
     utenti: 'Utenti',
     impostazioni: 'Impostazioni',
     signOut: 'Esci',
+    comingSoonTitle: 'Presto disponibile',
     comingSoon: 'Arriva con il Blocco A.',
   },
   resetPassword: {
@@ -60,7 +64,10 @@ export const t = {
   },
   products: {
     title: 'Prodotti',
-    empty: 'Nessun prodotto. Aggiungi il primo.',
+    emptyTitle: 'Nessun prodotto',
+    emptyAction: 'Aggiungi il primo',
+    noResultsTitle: 'Nessun risultato',
+    noResultsMessage: (query: string) => `Nessun prodotto per "${query}".`,
     add: 'Nuovo prodotto',
     name: 'Nome',
     barcode: 'Codice a barre',
@@ -74,6 +81,15 @@ export const t = {
     duplicateBarcode: (name: string) => `Questo codice è già associato a "${name}".`,
     barcodeLocked: 'Il codice a barre non si può cambiare: il prodotto ha già dei lotti.',
   },
+  oggi: {
+    greeting: (business: string) => `Ciao! Ecco lo stato di ${business}.`,
+    productsInCatalog: 'Prodotti a catalogo',
+    expiringSoon: 'In scadenza',
+    lowStock: 'Sotto scorta',
+    comingSoonCaption: 'Arriva col Blocco A',
+    quickActions: 'Azioni rapide',
+    searchProducts: 'Cerca un prodotto',
+  },
   errors: {
     generic: 'Qualcosa non ha funzionato. Riprova.',
     onlyTitolare: 'Solo il titolare può gestire gli utenti.',
@@ -84,3 +100,18 @@ export const t = {
     notPermitted: 'Non hai il permesso per questa azione.',
   },
 } as const;
+
+const ROLE_LABELS: Record<string, string> = {
+  titolare: 'Titolare',
+  responsabile: 'Responsabile',
+  operatore: 'Operatore',
+};
+
+/**
+ * `ProfileOut.role` travels as a plain string, not a literal union (the API
+ * is the source of truth for which roles exist). Falls back to the raw
+ * value for one this client does not recognise, rather than hiding it.
+ */
+export function roleLabel(role: string): string {
+  return ROLE_LABELS[role] ?? role;
+}

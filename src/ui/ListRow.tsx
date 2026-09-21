@@ -8,9 +8,14 @@ type Props = {
   subtitle?: string;
   right?: ReactNode;
   onPress?: () => void;
+  /** `destructive` colours the title red, for a row like "Esci". */
+  tone?: 'default' | 'destructive';
+  /** Set to `false` to suppress the chevron on a pressable row that is an
+   * action rather than navigation (again, "Esci"). Defaults to `true`. */
+  showChevron?: boolean;
 };
 
-export function ListRow({ title, subtitle, right, onPress }: Props) {
+export function ListRow({ title, subtitle, right, onPress, tone = 'default', showChevron = true }: Props) {
   const content = (
     <View
       style={{
@@ -23,7 +28,7 @@ export function ListRow({ title, subtitle, right, onPress }: Props) {
       }}
     >
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text variant="body" style={{ fontWeight: '500' }}>
+        <Text variant="body" tone={tone === 'destructive' ? 'red' : 'primary'} style={{ fontWeight: '500' }}>
           {title}
         </Text>
         {subtitle ? (
@@ -33,7 +38,7 @@ export function ListRow({ title, subtitle, right, onPress }: Props) {
         ) : null}
       </View>
       {right}
-      {onPress ? <Chevron /> : null}
+      {onPress && showChevron ? <Chevron /> : null}
     </View>
   );
 
@@ -48,6 +53,7 @@ export function ListRow({ title, subtitle, right, onPress }: Props) {
 function Chevron() {
   return (
     <View
+      testID="chevron"
       style={{
         width: 8,
         height: 13,
