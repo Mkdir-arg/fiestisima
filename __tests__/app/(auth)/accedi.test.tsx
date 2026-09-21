@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import AccediScreen from '@/app/(auth)/accedi';
-import { signIn } from '@/src/features/auth/api';
+import { forgotPassword, signIn } from '@/src/features/auth/api';
 import { useSessionContext } from '@/src/features/auth/SessionProvider';
 
 afterEach(cleanup);
@@ -12,6 +12,7 @@ jest.mock('expo-router', () => ({
 
 jest.mock('@/src/features/auth/api', () => ({
   signIn: jest.fn(),
+  forgotPassword: jest.fn(),
 }));
 
 jest.mock('@/src/features/auth/SessionProvider', () => ({
@@ -19,6 +20,7 @@ jest.mock('@/src/features/auth/SessionProvider', () => ({
 }));
 
 const mockedSignIn = signIn as unknown as jest.Mock;
+const mockedForgotPassword = forgotPassword as unknown as jest.Mock;
 const mockedUseSessionContext = useSessionContext as unknown as jest.Mock;
 
 function renderScreen() {
@@ -68,5 +70,40 @@ describe('AccediScreen', () => {
     mockedUseSessionContext.mockReturnValue({ refresh: jest.fn(), deactivated: true });
     await renderScreen();
     expect(screen.getByText('Il tuo account è stato disattivato. Contatta il titolare.')).toBeTruthy();
+  });
+
+  it('hides the password until the reveal toggle is pressed', async () => {
+    mockedUseSessionContext.mockReturnValue({ refresh: jest.fn(), deactivated: false });
+    await renderScreen();
+
+    // The first password anyone types here is the 20 random characters the
+    // bootstrap script printed, so being able to read it back matters.
+    expect(screen.getByLabelText('Password').props.secureTextEntry).toBe(true);
+    await fireEvent.press(screen.getByRole('button', { name: 'Mostra' }));
+    expect(screen.getByLabelText('Password').props.secureTextEntry).toBe(false);
+    await fireEvent.press(screen.getByRole('button', { name: 'Nascondi' }));
+    expect(screen.getByLabelText('Password').props.secureTextEntry).toBe(true);
+  });
+
+  it('asks for the email before sending a reset, then sends it', async () => {
+    mockedUseSessionContext.mockReturnValue({ refresh: jest.fn(), deactivated: false });
+    mockedForgotPassword.mockResolvedValue(undefined);
+    await renderScreen();
+
+    await fireEvent.press(screen.getByRole('button', { name: 'Password dimenticata?' }));
+    expect(mockedForgotPassword).not.toHaveBeenCalled();
+    expect(screen.getByText('Scrivi prima la tua email, poi tocca di nuovo.')).toBeTruthy();
+
+    await fireEvent.changeText(screen.getByLabelText('Email'), '  a@b.com  ');
+    await fireEvent.press(screen.getByRole('button', { name: 'Password dimenticata?' }));
+
+    await waitFor(() => expect(mockedForgotPassword).toHaveBeenCalledWith('a@b.com'));
+    // Same answer whether or not the address has an account: the screen
+    // must not let anyone probe for registered emails.
+    expect(
+      screen.getByText(
+        'Se esiste un account con questa email, ti arriveranno le istruzioni per cambiare la password.',
+      ),
+    ).toBeTruthy();
   });
 });

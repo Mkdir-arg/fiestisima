@@ -1,10 +1,21 @@
+import type { ReactNode, Ref } from 'react';
 import { TextInput, View, type TextInputProps } from 'react-native';
 import { Text } from './Text';
 import { colors, space, HIT_SIZE } from './tokens';
 
-type Props = TextInputProps & { label: string };
+type Props = TextInputProps & {
+  label: string;
+  /** Trailing accessory inside the row, e.g. a show/hide password toggle. */
+  right?: ReactNode;
+  /**
+   * Forwarded to the input itself, so one field can move focus to the
+   * next. Declared explicitly because React 19 passes `ref` as an
+   * ordinary prop, and TextInputProps does not carry it.
+   */
+  ref?: Ref<TextInput>;
+};
 
-export function Field({ label, style, ...rest }: Props) {
+export function Field({ label, style, right, ref, ...rest }: Props) {
   return (
     <View
       style={{
@@ -19,6 +30,7 @@ export function Field({ label, style, ...rest }: Props) {
         {label}
       </Text>
       <TextInput
+        ref={ref}
         accessibilityLabel={label}
         aria-labelledby={`label-${label}`}
         placeholderTextColor={colors.textTertiary}
@@ -28,6 +40,7 @@ export function Field({ label, style, ...rest }: Props) {
           style,
         ]}
       />
+      {right}
     </View>
   );
 }
