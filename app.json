@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "fiestisima",
+    "name": "Fiestisima",
     "slug": "fiestisima",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -19,7 +19,12 @@
     "web": {
       "bundler": "metro",
       "output": "single",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/favicon.png",
+      "lang": "it",
+      "name": "Fiestisima",
+      "shortName": "Fiestisima",
+      "themeColor": "#F2F2F7",
+      "description": "Gestione magazzino ed eventi"
     },
     "plugins": [
       "expo-router",
